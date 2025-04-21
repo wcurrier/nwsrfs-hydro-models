@@ -67,6 +67,10 @@ If adapting this code, please credit this repository as the original source.
 * Linsley, R.K., et al. Hydrology for Engineers, McGraw-Hill series in water resources and environmental engineering. McGraw-Hill, 1982
 * NOAA. Consumptive Use Operation. National Oceanic and Atmospheric Administration, 2005
 
+## Acknowledgment
+
+Guidance on compiling and running NWSRFS code was informed by work from Andy Wood ([andywood@ucar.edu](mailto:andywood@ucar.edu)) and collaborators. See: [NWS_hydro_models](https://github.com/NCAR/NWS_hydro_models/) GitHub repository
+
 ## Legal Disclaimer
 
 This is a scientific product and does not represent official communication from NOAA or the U.S. Department of Commerce. All code is provided "as is."
