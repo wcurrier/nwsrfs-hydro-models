@@ -39,7 +39,7 @@ See the documentation `?rfchydromodels` and `?sac_snow_uh` for examples.
 ### Python Package Installation
 
 **Tested Python Version:** 3.10.3\
-**Package Dependencies:**  numpy, pandas, lxml\
+**Package Dependencies:**  numpy, pandas\
 **Dependencies:** numpy, pandas
 numpy's `f2py` is used to compile the source code and FORTRAN wrappers. To compile the FORTRAN source:
 
