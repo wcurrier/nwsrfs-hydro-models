@@ -4,6 +4,28 @@
 *.o
 *.obj
 
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+out.txt
+
+# R outputs
+Rplots.pdf
+*.png
+*.csv
+*.rds
+
+# Model outputs
+rfchydromodels/flow_*
+rfchydromodels/output.*
+rfchydromodels/restart_*
+rfchydromodels/sac_states*
+
+# Scratch / generated directories
+rfchydromodels/saving_states_repo/
+
 # Precompiled Headers
 *.gch
 *.pch
