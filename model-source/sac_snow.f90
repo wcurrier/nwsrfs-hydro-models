@@ -5,10 +5,18 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
     snow_pars, &
     init_swe, &
     map, ptps, mat, etd, &
-    return_states, &
+    return_states, save_restart, &
+    use_restart, &  ! NEW: flag to use restart states
+    restart_uztwc_in, restart_uzfwc_in, restart_lztwc_in, &  ! NEW: input restart states
+    restart_lzfsc_in, restart_lzfpc_in, restart_adimc_in, &
+    restart_cs_in, restart_taprev_in, &
     tci, aet, uztwc, uzfwc, lztwc, lzfsc, lzfpc, adimc, &
     roimp, sdro, ssur, sif, bfs, bfp, &
-    swe, aesc, neghs, liqw, raim, psfall, prain)
+    swe, aesc, neghs, liqw, raim, psfall, prain, &
+    restart_uztwc, restart_uzfwc, restart_lztwc, restart_lzfsc, &
+    restart_lzfpc, restart_adimc, restart_cs, restart_taprev)
+
+
 
 ! !     Subroutine Description
 ! !     -----------------------------------
@@ -64,14 +72,32 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
 
   implicit none
 
+  ! Add declarations
+  logical, intent(in) :: use_restart
+  double precision, dimension(n_hrus), intent(in) :: &
+          restart_uztwc_in, restart_uzfwc_in, restart_lztwc_in, &
+          restart_lzfsc_in, restart_lzfpc_in, restart_adimc_in, &
+          restart_taprev_in
+  double precision, dimension(19,n_hrus), intent(in) :: restart_cs_in
+  
+
   double precision, parameter:: pi=3.141592653589793238462643383279502884197d0
   double precision, parameter:: sec_day = 86400.     !seconds in a day
   double precision, parameter:: sec_hour = 3600.     !seconds in an hour
   integer, parameter:: sp = KIND(1.0)
   integer:: k
 
-  logical:: return_states
+  logical, intent(in) :: return_states
+  logical, intent(in) :: save_restart
+  
+  ! Restart (carryover) outputs
+  double precision, dimension(n_hrus), intent(out) :: &
+          restart_uztwc, restart_uzfwc, restart_lztwc, restart_lzfsc, &
+          restart_lzfpc, restart_adimc
 
+  double precision, dimension(19,n_hrus), intent(out) :: restart_cs
+  double precision, dimension(n_hrus), intent(out) :: restart_taprev
+  
   integer, intent(in):: n_hrus ! number of zones
 
   ! sac pars matrix 
@@ -114,7 +140,7 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
 
   ! local variables
   integer:: nh,i,j          ! AWW index for looping through areas
-  integer:: sim_length   ! length of simulation (days)
+  integer, intent(in) :: sim_length
 
   ! single precision sac-sma and snow variables
   ! these are single precision so as to be supplied to 
@@ -261,126 +287,144 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
     ! get sfc_pressure (pa is estimate by subroutine, needed by snow17 call)
     pa = sfc_pressure(elev(nh))
   
-    ! =============== Spin up procedure =====================================
+  
+    ! =============== Initialize states =====================================
 
-    ! starting values
-    spin_up_start_states = 1d0 
-    spin_up_end_states = 0d0
-    pdiff = 1d0
-    ts_per_year = ts_per_day * 365
-    spin_up_counter = 0
-    spin_up_max_iter = 50
+    if (use_restart) then
+      ! Use provided restart states (warm start)
+      init_uztwc(nh) = restart_uztwc_in(nh)
+      init_uzfwc(nh) = restart_uzfwc_in(nh)
+      init_lztwc(nh) = restart_lztwc_in(nh)
+      init_lzfsc(nh) = restart_lzfsc_in(nh)
+      init_lzfpc(nh) = restart_lzfpc_in(nh)
+      init_adimc(nh) = restart_adimc_in(nh)
 
-    do while (pdiff > 0.01 .and. spin_up_counter < spin_up_max_iter)
+      ! Skip spin-up entirely
+    else
+      ! =============== Spin up procedure =====================================
 
-      spin_up_counter = spin_up_counter + 1
+      ! starting values
+      spin_up_start_states = 1d0 
+      spin_up_end_states = 0d0
+      pdiff = 1d0
+      ts_per_year = ts_per_day * 365
+      spin_up_counter = 0
+      spin_up_max_iter = 50
 
-      ! put the ending states from the previous iteration as the starting states 
-      uztwc_sp = real(spin_up_end_states(1))
-      uzfwc_sp = real(spin_up_end_states(2))
-      lztwc_sp = real(spin_up_end_states(3))
-      lzfsc_sp = real(spin_up_end_states(4))
-      lzfpc_sp = real(spin_up_end_states(5))
-      adimc_sp = real(spin_up_end_states(6))
+      do while (pdiff > 0.01 .and. spin_up_counter < spin_up_max_iter)
 
-      ! inital swe will usually be 0, except for glaciers 
-      cs(1) = real(init_swe(nh))
-      ! set the rest to zero
-      cs(2:19) = 0.0
-      taprev_sp = real(mat(1,nh))
+        spin_up_counter = spin_up_counter + 1
 
-      psfall_sp = real(0)
-      prain_sp = real(0)
-      aesc_sp = real(0)
-      roimp_sp = real(0)
-      sdro_sp = real(0)
-      ssur_sp = real(0)
-      sif_sp = real(0)
-      bfs_sp = real(0)
-      bfp_sp = real(0)
-      
+        ! put the ending states from the previous iteration as the starting states 
+        uztwc_sp = real(spin_up_end_states(1))
+        uzfwc_sp = real(spin_up_end_states(2))
+        lztwc_sp = real(spin_up_end_states(3))
+        lzfsc_sp = real(spin_up_end_states(4))
+        lzfpc_sp = real(spin_up_end_states(5))
+        adimc_sp = real(spin_up_end_states(6))
 
-      ! run for 1 year 
-      do i = 1,ts_per_year
+        ! inital swe will usually be 0, except for glaciers 
+        cs(1) = real(init_swe(nh))
+        ! set the rest to zero
+        cs(2:19) = 0.0
+        taprev_sp = real(mat(1,nh))
 
-        ! apply pe and px adjustments (zone-wise) for the current timestep
-        map_step = map(i,nh) * pxadj(nh)
-        etd_step = etd(i,nh) * peadj(nh)
+        psfall_sp = real(0)
+        prain_sp = real(0)
+        aesc_sp = real(0)
+        roimp_sp = real(0)
+        sdro_sp = real(0)
+        ssur_sp = real(0)
+        sif_sp = real(0)
+        bfs_sp = real(0)
+        bfp_sp = real(0)
 
-        call exsnow19(int(dt/sec_hour,4),int(day(i),4),int(month(i),4),int(year(i),4),&
-            !SNOW17 INPUT AND OUTPUT VARIABLES
-            real(map_step), real(ptps(i,nh)), real(mat(i,nh)), &
-            raim_sp, sneqv_sp, snow_sp, snowh_sp, psfall_sp, prain_sp, aesc_sp,&
-            !SNOW17 PARAMETERS
-            !ALAT,SCF,MFMAX,MFMIN,UADJ,SI,NMF,TIPM,MBASE,PXTEMP,PLWHC,DAYGM,ELEV,PA,ADC
-            real(latitude(nh)), real(scf(nh)), real(mfmax(nh)), real(mfmin(nh)), &
-            real(uadj(nh)), real(si(nh)), real(nmf(nh)), &
-            real(tipm(nh)), real(mbase(nh)), real(pxtemp(nh)), real(plwhc(nh)), real(daygm(nh)),&
-            real(elev(nh)), real(pa), real(adc_x), &
-            !SNOW17 CARRYOVER VARIABLES
-            cs, taprev_sp) 
 
-        ! taprev does not get updated in place like cs does
-        taprev_sp = real(mat(i,nh))
+        ! run for 1 year 
+        do i = 1,ts_per_year
 
-        ! modify ET demand using the effective forest cover 
-        ! Anderson calb manual pdf page 232
-        etd_step = efc(nh)*etd_step+(1d0-efc(nh))*(1d0-dble(aesc_sp))*etd_step
-    
-        call exsac(real(dt), raim_sp, real(etd_step), &
-            !SAC PARAMETERS
-            !UZTWM,UZFWM,UZK,PCTIM,ADIMP,RIVA,ZPERC, &
-            !REXP,LZTWM,LZFSM,LZFPM,LZSK,LZPK,PFREE, &
-            !SIDE,RSERV, &
-            real(uztwm(nh)), real(uzfwm(nh)), real(uzk(nh)), real(pctim(nh)), &
-            real(adimp(nh)), real(riva(nh)), real(zperc(nh)), &
-            real(rexp(nh)), real(lztwm(nh)), real(lzfsm(nh)), real(lzfpm(nh)), &
-            real(lzsk(nh)), real(lzpk(nh)), real(pfree(nh)),&
-            real(side(nh)), real(rserv(nh)), &
-            !SAC State variables
-            uztwc_sp, uzfwc_sp, lztwc_sp, lzfsc_sp, lzfpc_sp, adimc_sp, &
-            !SAC Runoff variables
-            roimp_sp,sdro_sp,ssur_sp,sif_sp,bfs_sp,bfp_sp, &
-            !SAC OUTPUTS
-            tci_sp, aet_sp)
+          ! apply pe and px adjustments (zone-wise) for the current timestep
+          map_step = map(i,nh) * pxadj(nh)
+          etd_step = etd(i,nh) * peadj(nh)
 
-      end do  ! spin up 1 year loop 
+          call exsnow19(int(dt/sec_hour,4),int(day(i),4),int(month(i),4),int(year(i),4),&
+              !SNOW17 INPUT AND OUTPUT VARIABLES
+              real(map_step), real(ptps(i,nh)), real(mat(i,nh)), &
+              raim_sp, sneqv_sp, snow_sp, snowh_sp, psfall_sp, prain_sp, aesc_sp,&
+              !SNOW17 PARAMETERS
+              !ALAT,SCF,MFMAX,MFMIN,UADJ,SI,NMF,TIPM,MBASE,PXTEMP,PLWHC,DAYGM,ELEV,PA,ADC
+              real(latitude(nh)), real(scf(nh)), real(mfmax(nh)), real(mfmin(nh)), &
+              real(uadj(nh)), real(si(nh)), real(nmf(nh)), &
+              real(tipm(nh)), real(mbase(nh)), real(pxtemp(nh)), real(plwhc(nh)), real(daygm(nh)),&
+              real(elev(nh)), real(pa), real(adc_x), &
+              !SNOW17 CARRYOVER VARIABLES
+              cs, taprev_sp) 
 
-      spin_up_end_states(1) = dble(uztwc_sp)
-      spin_up_end_states(2) = dble(uzfwc_sp)
-      spin_up_end_states(3) = dble(lztwc_sp)
-      spin_up_end_states(4) = dble(lzfsc_sp)
-      spin_up_end_states(5) = dble(lzfpc_sp)
-      spin_up_end_states(6) = dble(adimc_sp)
+          ! taprev does not get updated in place like cs does
+          taprev_sp = real(mat(i,nh))
 
-      pdiff = 0.0
-      do k=1,6
-        ! avoid divide by zero 
-        if(spin_up_start_states(k) < 0.000001)then
-          cycle
-        end if
-        pdiff = pdiff + abs(spin_up_start_states(k)-spin_up_end_states(k))/spin_up_start_states(k)
-      end do
-      ! on the first iteration all the states are at zero so 
-      ! artificially set pdiff and keep going
-      if(spin_up_counter .eq. 1) pdiff = 1.0
+          ! modify ET demand using the effective forest cover 
+          ! Anderson calb manual pdf page 232
+          etd_step = efc(nh)*etd_step+(1d0-efc(nh))*(1d0-dble(aesc_sp))*etd_step
 
-      spin_up_start_states = spin_up_end_states
+          call exsac(real(dt), raim_sp, real(etd_step), &
+              !SAC PARAMETERS
+              !UZTWM,UZFWM,UZK,PCTIM,ADIMP,RIVA,ZPERC, &
+              !REXP,LZTWM,LZFSM,LZFPM,LZSK,LZPK,PFREE, &
+              !SIDE,RSERV, &
+              real(uztwm(nh)), real(uzfwm(nh)), real(uzk(nh)), real(pctim(nh)), &
+              real(adimp(nh)), real(riva(nh)), real(zperc(nh)), &
+              real(rexp(nh)), real(lztwm(nh)), real(lzfsm(nh)), real(lzfpm(nh)), &
+              real(lzsk(nh)), real(lzpk(nh)), real(pfree(nh)),&
+              real(side(nh)), real(rserv(nh)), &
+              !SAC State variables
+              uztwc_sp, uzfwc_sp, lztwc_sp, lzfsc_sp, lzfpc_sp, adimc_sp, &
+              !SAC Runoff variables
+              roimp_sp,sdro_sp,ssur_sp,sif_sp,bfs_sp,bfp_sp, &
+              !SAC OUTPUTS
+              tci_sp, aet_sp)
 
-      ! write(*,'(7f10.3)')pdiff, spin_up_start_states
+        end do  ! spin up 1 year loop 
 
-    end do 
-    ! write(*,*)
+        spin_up_end_states(1) = dble(uztwc_sp)
+        spin_up_end_states(2) = dble(uzfwc_sp)
+        spin_up_end_states(3) = dble(lztwc_sp)
+        spin_up_end_states(4) = dble(lzfsc_sp)
+        spin_up_end_states(5) = dble(lzfpc_sp)
+        spin_up_end_states(6) = dble(adimc_sp)
 
-    ! Save the spun up states to use for init in the full run
-    init_uztwc(nh) = spin_up_end_states(1)
-    init_uzfwc(nh) = spin_up_end_states(2)
-    init_lztwc(nh) = spin_up_end_states(3)
-    init_lzfsc(nh) = spin_up_end_states(4)
-    init_lzfpc(nh) = spin_up_end_states(5)
-    init_adimc(nh) = spin_up_end_states(6)
+        pdiff = 0.0
+        do k=1,6
+          ! avoid divide by zero 
+          if(spin_up_start_states(k) < 0.000001)then
+            cycle
+          end if
+          pdiff = pdiff + abs(spin_up_start_states(k)-spin_up_end_states(k))/spin_up_start_states(k)
+        end do
+        ! on the first iteration all the states are at zero so 
+        ! artificially set pdiff and keep going
+        if(spin_up_counter .eq. 1) pdiff = 1.0
 
-    ! =============== End spin up procedure =====================================
+        spin_up_start_states = spin_up_end_states
+
+        ! write(*,'(7f10.3)')pdiff, spin_up_start_states
+
+      end do 
+      ! write(*,*)
+
+      ! Save the spun up states to use for init in the full run
+      init_uztwc(nh) = spin_up_end_states(1)
+      init_uzfwc(nh) = spin_up_end_states(2)
+      init_lztwc(nh) = spin_up_end_states(3)
+      init_lzfsc(nh) = spin_up_end_states(4)
+      init_lzfpc(nh) = spin_up_end_states(5)
+      init_adimc(nh) = spin_up_end_states(6)
+
+      ! =============== End spin up procedure =====================================
+
+    end if  ! <-- ADD THIS: closes the if (use_restart) block
+
+    ! =============== Set initial states for simulation =====================================
 
     ! set single precision sac state variables to initial values
     uztwc_sp = real(init_uztwc(nh))
@@ -390,13 +434,26 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
     lzfpc_sp = real(init_lzfpc(nh))
     adimc_sp = real(init_adimc(nh))
 
-    ! initialize first/main component of SWE (model 'WE')
-    ! inital swe will usually be 0, except for glaciers 
-    cs(1) = real(init_swe(nh))
-    ! set the rest to zero
-    cs(2:19) = 0.0
-    taprev_sp = real(mat(1,nh))
-     
+    ! Initialize SNOW17 states
+    if (use_restart) then
+      cs(:) = real(restart_cs_in(:,nh))
+      taprev_sp = real(restart_taprev_in(nh))
+
+      ! DEBUG: Print what we loaded
+      if (nh == 1) then
+        write(*,*) 'Loaded restart cs for zone 1:'
+        write(*,*) '  cs(1):', cs(1)
+        write(*,*) '  cs(3):', cs(3)
+        write(*,*) '  cs(9):', cs(9)
+        write(*,*) '  cs(11-13):', cs(11), cs(12), cs(13)
+      end if
+    else
+      cs(1) = real(init_swe(nh))
+      cs(2:19) = 0.0
+      taprev_sp = real(mat(1,nh))
+    end if
+
+
     psfall_sp = real(0)
     prain_sp = real(0)
     aesc_sp = real(0)
@@ -406,7 +463,7 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
     sif_sp = real(0)
     bfs_sp = real(0)
     bfp_sp = real(0)
-    
+
     ! =============== START SIMULATION TIME LOOP =====================================
     do i = 1,sim_length,1
 
@@ -494,6 +551,20 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
 
         swe(i,nh) = dble(cs(1))+dble(cs(3))+dble(cs(9))+TEX
       end if
+      
+      ! At the final timestep only:
+      if (save_restart .and. i == sim_length) then
+        restart_uztwc(nh) = dble(uztwc_sp)
+        restart_uzfwc(nh) = dble(uzfwc_sp)
+        restart_lztwc(nh) = dble(lztwc_sp)
+        restart_lzfsc(nh) = dble(lzfsc_sp)
+        restart_lzfpc(nh) = dble(lzfpc_sp)
+        restart_adimc(nh) = dble(adimc_sp)
+
+        restart_cs(:,nh) = dble(cs(:))
+        restart_taprev(nh) = dble(taprev_sp)
+      end if
+
 
       
       ! PQNET

@@ -75,6 +75,140 @@ sac_snow_uh_lagk <- function(dt_hours, forcing, uptribs, pars) {
   total_flow_cfs <- chanloss(flow_cfs + lagk_flow_cfs, forcing, dt_hours, pars)
   total_flow_cfs
 }
+########################################################################
+########################################################################
+#### Create a new function instead of mutating sac_snow_uh_lagk(): #####
+########################################################################
+########################################################################
+
+sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars, 
+                                    restart_file = NULL, 
+                                    lagk_restart_file = NULL,
+                                    uh_restart_file = NULL,
+                                    debug_components = FALSE) {
+  
+  # ---- SAC-SMA + SNOW17 ----
+  sac_out <- sac_snow(
+    dt_hours,
+    forcing,
+    pars,
+    return_states = TRUE,
+    save_restart = TRUE,
+    restart_file = restart_file
+  )
+  
+  # Extract states and restart values
+  if (is.list(sac_out) && !is.null(sac_out$states)) {
+    states_df <- sac_out$states
+    restart_vals <- sac_out$restart
+  } else {
+    states_df <- sac_out
+    restart_vals <- NULL
+  }
+  
+  # ---- extract & combine per-zone TCI ----
+  tci_cols <- grep("^tci_", names(states_df), value = TRUE)
+  if (length(tci_cols) == 0) {
+    stop("No tci_* columns found in sac_snow output")
+  }
+  tci <- as.matrix(states_df[, tci_cols])
+  
+  # ---- Load UH restart states if provided ----
+  uh_restart <- NULL
+  if (!is.null(uh_restart_file) && file.exists(uh_restart_file)) {
+#     cat("Loading UH restart states from:", uh_restart_file, "\n")
+    uh_restart <- readRDS(uh_restart_file)  # Use RDS for complex R objects
+#     cat("Loaded UH restart states for", length(uh_restart), "zones\n")
+  }
+
+  # ---- UH routing (with restart states) ----
+  uh_result <- uh(
+    dt_hours, 
+    tci, 
+    pars,
+    return_states = TRUE,  # Always get states to save them
+    uh_restart = uh_restart
+  )
+    
+  flow_uh <- uh_result$flow
+  uh_restart_out <- uh_result$restart
+  
+  # ---- Load Lag-K restart states if provided ----
+  restart_c_array <- NULL
+  if (!is.null(lagk_restart_file) && file.exists(lagk_restart_file)) {
+    cat("Loading Lag-K restart states from:", lagk_restart_file, "\n")
+    restart_c_array <- readRDS(lagk_restart_file)
+    cat("Loaded Lag-K C array for", ncol(restart_c_array), "tributaries\n")
+  }
+  
+  # ---- Lag-K routing (with restart states) ----
+  flow_lagk_result <- lagk(
+    dt_hours, 
+    uptribs, 
+    pars,
+    sum_routes = TRUE,
+    return_states = TRUE,
+    restart_c_array = restart_c_array
+  )
+  
+  # Extract routed flow
+  if (is.data.frame(flow_lagk_result)) {
+    lagk_routed_cols <- grep("^routed_", names(flow_lagk_result), value = TRUE)
+    if (length(lagk_routed_cols) > 0) {
+      lagk_flow <- rowSums(as.matrix(flow_lagk_result[, lagk_routed_cols, drop = FALSE]))
+    } else {
+      stop("No routed flow columns found in Lag-K output")
+    }
+    
+    # Save Lag-K restart state (the C array)
+    lagk_restart <- attr(flow_lagk_result, "c_array")
+      
+    # When saving (in sac_snow_uh_lagk_states):
+    if (!is.null(lagk_restart)) {
+      saveRDS(lagk_restart, "lagk_restart_split.rds")  # Changed from .csv to .rds
+      cat("Saved lagk_restart_split.rds\n")
+    }
+    
+  } else {
+    lagk_flow <- flow_lagk_result
+    lagk_restart <- NULL
+  }
+    
+    
+  # ---- Channel loss ----
+  total_flow_cfs <- chanloss(
+    flow_uh + lagk_flow,
+    forcing,
+    dt_hours,
+    pars
+  )
+  
+  # ---- Build result ----
+  result <- list(
+    flow_cfs = total_flow_cfs,
+    states = states_df
+  )
+  
+  # Add debug components if requested
+  if (debug_components) {
+    result$flow_uh <- flow_uh
+    result$flow_lagk <- lagk_flow
+    result$flow_before_chanloss <- flow_uh + lagk_flow
+  }
+  
+  # Add restart states
+  if (!is.null(restart_vals)) {
+    result$restart <- restart_vals
+  }
+  if (!is.null(lagk_restart)) {
+    result$lagk_restart <- lagk_restart
+  }
+  if (!is.null(uh_restart_out)) {
+    result$uh_restart <- uh_restart_out
+  }
+  
+  return(result)
+}
 
 #' Execute SAC-SMA, SNOW17, return total channel inflow per zone, and model states
 #'
@@ -112,7 +246,11 @@ sac_snow_states <- function(dt_hours, forcing, pars) {
 #' dt_hours <- 6
 #' flow <- sac_snow(dt_hours, forcingSAKW1, parsSAKW1)
 #' @useDynLib rfchydromodels sacsnow_
-sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE) {
+sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE, 
+                     save_restart = FALSE, restart_file = NULL) {
+  return_states <- as.integer(return_states)
+  save_restart <- as.integer(save_restart)
+  
   pars <- as.data.frame(pars)
 
   sec_per_day <- 86400
@@ -121,8 +259,83 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE) {
   n_zones <- length(forcing)
   sim_length <- nrow(forcing[[1]])
 
+  # Check if we're doing a warm start
+  use_restart <- FALSE
+  restart_uztwc_in <- numeric(n_zones)
+  restart_uzfwc_in <- numeric(n_zones)
+  restart_lztwc_in <- numeric(n_zones)
+  restart_lzfsc_in <- numeric(n_zones)
+  restart_lzfpc_in <- numeric(n_zones)
+  restart_adimc_in <- numeric(n_zones)
+  restart_cs_in <- matrix(0, nrow = 19, ncol = n_zones)
+  restart_taprev_in <- numeric(n_zones)    
+
+  # Check if we're doing a warm start
+  use_restart <- FALSE
+  restart_uztwc_in <- numeric(n_zones)
+  restart_uzfwc_in <- numeric(n_zones)
+  restart_lztwc_in <- numeric(n_zones)
+  restart_lzfsc_in <- numeric(n_zones)
+  restart_lzfpc_in <- numeric(n_zones)
+  restart_adimc_in <- numeric(n_zones)
+  restart_cs_in <- matrix(0, nrow = 19, ncol = n_zones)
+  restart_taprev_in <- numeric(n_zones)
+  
+  if (!is.null(restart_file)) {
+    cat("Using warm start from:", restart_file, "\n")
+    use_restart <- TRUE
+    
+    # Read restart file
+    restart_data <- read.csv(restart_file)
+    
+    # Check that we have the right number of zones
+    if (nrow(restart_data) != n_zones) {
+      stop(paste("Restart file has", nrow(restart_data), 
+                 "zones but forcing has", n_zones, "zones"))
+    }
+    
+    # Extract SAC states
+    restart_uztwc_in <- restart_data$uztwc
+    restart_uzfwc_in <- restart_data$uzfwc
+    restart_lztwc_in <- restart_data$lztwc
+    restart_lzfsc_in <- restart_data$lzfsc
+    restart_lzfpc_in <- restart_data$lzfpc
+    restart_adimc_in <- restart_data$adimc
+    restart_taprev_in <- restart_data$taprev
+    
+    # Extract SNOW17 carryover states (cs_1 through cs_19)
+    for (i in 1:19) {
+      cs_col <- paste0("cs_", i)
+      restart_cs_in[i, ] <- restart_data[[cs_col]]
+    }
+  }
+  
+  use_restart <- as.integer(use_restart)
+    
   output_matrix <- matrix(0, nrow = sim_length, ncol = n_zones)
 
+  tci    <- matrix(0, nrow = sim_length, ncol = n_zones)
+  aet    <- matrix(0, nrow = sim_length, ncol = n_zones)
+  uztwc  <- matrix(0, nrow = sim_length, ncol = n_zones)
+  uzfwc  <- matrix(0, nrow = sim_length, ncol = n_zones)
+  lztwc  <- matrix(0, nrow = sim_length, ncol = n_zones)
+  lzfsc  <- matrix(0, nrow = sim_length, ncol = n_zones)
+  lzfpc  <- matrix(0, nrow = sim_length, ncol = n_zones)
+  adimc  <- matrix(0, nrow = sim_length, ncol = n_zones)
+  roimp  <- matrix(0, nrow = sim_length, ncol = n_zones)
+  sdro   <- matrix(0, nrow = sim_length, ncol = n_zones)
+  ssur   <- matrix(0, nrow = sim_length, ncol = n_zones)
+  sif    <- matrix(0, nrow = sim_length, ncol = n_zones)
+  bfs    <- matrix(0, nrow = sim_length, ncol = n_zones)
+  bfp    <- matrix(0, nrow = sim_length, ncol = n_zones)
+  swe    <- matrix(0, nrow = sim_length, ncol = n_zones)
+  aesc   <- matrix(0, nrow = sim_length, ncol = n_zones)
+  neghs  <- matrix(0, nrow = sim_length, ncol = n_zones)
+  liqw   <- matrix(0, nrow = sim_length, ncol = n_zones)
+  raim   <- matrix(0, nrow = sim_length, ncol = n_zones)
+  psfall <- matrix(0, nrow = sim_length, ncol = n_zones)
+  prain  <- matrix(0, nrow = sim_length, ncol = n_zones)
+    
   sac_pars <- rbind(
     pars[pars$name == "uztwm", ]$value,
     pars[pars$name == "uzfwm", ]$value,
@@ -159,69 +372,89 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE) {
     pars[pars$name == "adc_c", ]$value
   )
 
-  # sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
-  #           latitude, elev, &
-  #           sac_pars, &
-  #           peadj, pxadj, &
-  #           snow_pars, &
-  #           init_swe, &
-  #           map, ptps, mat, etd, &
-  #           return_states, &
-  #           tci, aet, uztwc, uzfwc, lztwc, lzfsc, lzfpc, adimc, &
-  #           roimp, sdro, ssur, sif, bfs, bfp, &
-  #           swe, aesc, neghs, liqw, raim, psfall, prain)
 
+  map_mat <- do.call("cbind", lapply(forcing, "[[", "map_mm"))
+  stopifnot(dim(map_mat) == c(sim_length, n_zones))
+
+  ptps_mat <- do.call("cbind", lapply(forcing, "[[", "ptps"))
+  mat_mat  <- do.call("cbind", lapply(forcing, "[[", "mat_degc"))
+  etd_mat  <- do.call("cbind", lapply(forcing, "[[", "etd_mm"))
+
+  stopifnot(dim(ptps_mat)  == c(sim_length, n_zones))
+  stopifnot(dim(mat_mat)   == c(sim_length, n_zones))
+  stopifnot(dim(etd_mat)   == c(sim_length, n_zones))
+
+  # Initialize the new restart output matrices
+  restart_uztwc <- numeric(n_zones)
+  restart_uzfwc <- numeric(n_zones)
+  restart_lztwc <- numeric(n_zones)
+  restart_lzfsc <- numeric(n_zones)
+  restart_lzfpc <- numeric(n_zones)
+  restart_adimc <- numeric(n_zones)
+  restart_cs <- matrix(0, nrow = 19, ncol = n_zones)
+  restart_taprev <- numeric(n_zones)
+        
   x <- .Fortran("sacsnow",
     n_hrus = as.integer(n_zones),
     dt = as.integer(dt_seconds),
-    sim_length = sim_length,
+    sim_length = as.integer(sim_length),
     year = as.integer(forcing[[1]]$year)[1:sim_length],
     month = as.integer(forcing[[1]]$month)[1:sim_length],
     day = as.integer(forcing[[1]]$day)[1:sim_length],
     hour = as.integer(forcing[[1]]$hour)[1:sim_length],
-    # zone info
     latitude = pars[pars$name == "alat", ]$value,
     elev = pars[pars$name == "elev", ]$value,
-    # sac parameters
     sac_pars = sac_pars,
-    # pet and precp adjustments
     peadj = pars[pars$name == "peadj", ]$value,
     pxadj = pars[pars$name == "pxadj", ]$value,
-    # snow parameters
     snow_pars = snow_pars,
-    # initial conditions
     init_swe = pars[pars$name == "init_swe", ]$value,
-    # forcings
-    map = do.call("cbind", lapply(forcing, "[[", "map_mm")),
+    map = map_mat,
     ptps = do.call("cbind", lapply(forcing, "[[", "ptps")),
     mat = do.call("cbind", lapply(forcing, "[[", "mat_degc")),
     etd = do.call("cbind", lapply(forcing, "[[", "etd_mm")),
-    # should the states be output
     return_states = return_states,
-    # output
-    tci = output_matrix,
-    aet = output_matrix,
-    uztwc = output_matrix,
-    uzfwc = output_matrix,
-    lztwc = output_matrix,
-    lzfsc = output_matrix,
-    lzfpc = output_matrix,
-    adimc = output_matrix,
-    roimp = output_matrix,
-    sdro = output_matrix,
-    ssur = output_matrix,
-    sif = output_matrix,
-    bfs = output_matrix,
-    bfp = output_matrix,
-    swe = output_matrix,
-    aesc = output_matrix,
-    neghs = output_matrix,
-    liqw = output_matrix,
-    raim = output_matrix,
-    psfall = output_matrix,
-    prain = output_matrix
+    save_restart = save_restart,
+    use_restart = use_restart,  # NEW
+    restart_uztwc_in = restart_uztwc_in,  # NEW
+    restart_uzfwc_in = restart_uzfwc_in,
+    restart_lztwc_in = restart_lztwc_in,
+    restart_lzfsc_in = restart_lzfsc_in,
+    restart_lzfpc_in = restart_lzfpc_in,
+    restart_adimc_in = restart_adimc_in,
+    restart_cs_in = restart_cs_in,
+    restart_taprev_in = restart_taprev_in,
+    tci = tci,
+    aet = aet,
+    uztwc = uztwc,
+    uzfwc = uzfwc,
+    lztwc = lztwc,
+    lzfsc = lzfsc,
+    lzfpc = lzfpc,
+    adimc = adimc,
+    roimp = roimp,
+    sdro = sdro,
+    ssur = ssur,
+    sif = sif,
+    bfs = bfs,
+    bfp = bfp,
+    swe = swe,
+    aesc = aesc,
+    neghs = neghs,
+    liqw = liqw,
+    raim = raim,
+    psfall = psfall,
+    prain = prain,
+    restart_uztwc = restart_uztwc,
+    restart_uzfwc = restart_uzfwc,
+    restart_lztwc = restart_lztwc,
+    restart_lzfsc = restart_lzfsc,
+    restart_lzfpc = restart_lzfpc,
+    restart_adimc = restart_adimc,
+    restart_cs = restart_cs,
+    restart_taprev = restart_taprev
   )
-
+    
   if (return_states) {
     return_vars <- c(
       "year", "month", "day", "hour",
@@ -231,18 +464,35 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE) {
       "swe", "aesc", "neghs", "liqw", "raim", "psfall", "prain"
     )
 
-    # if pet exists in the input forcings, output it as is
     if (!is.null(forcing[[1]]$pet_mm)) {
       x[["pet"]] <- do.call("cbind", lapply(forcing, "[[", "pet_mm"))
       return_vars <- c(return_vars, "pet")
     }
 
-    return(format_states(x[return_vars]))
+    states_df <- format_states(x[return_vars])
+    
+    if (save_restart) {
+      # Return both time series states AND restart states
+      return(list(
+        states = states_df,
+        restart = list(
+          uztwc = x$restart_uztwc,
+          uzfwc = x$restart_uzfwc,
+          lztwc = x$restart_lztwc,
+          lzfsc = x$restart_lzfsc,
+          lzfpc = x$restart_lzfpc,
+          adimc = x$restart_adimc,
+          cs = x$restart_cs,
+          taprev = x$restart_taprev
+        )
+      ))
+    } else {
+      return(states_df)
+    }
   } else {
     return(x$tci)
   }
 }
-
 
 #' Format state output from sac_snow_states
 #'
@@ -259,6 +509,86 @@ format_states <- function(x) {
     }
   }
   df
+}
+
+#' Subset forcing data by date range
+#'
+#' @param forcing List of forcing dataframes (one per zone)
+#' @param start_date Date object or string "YYYY-MM-DD"
+#' @param end_date Date object or string "YYYY-MM-DD"
+#' @return Subsetted forcing list
+subset_forcing_dt <- function(forcing, start_dt = NULL, end_dt = NULL) {
+
+  # Build POSIXct datetime from first zone
+  forcing_dt <- as.POSIXct(
+    ISOdatetime(
+      forcing[[1]]$year,
+      forcing[[1]]$month,
+      forcing[[1]]$day,
+      forcing[[1]]$hour,
+      0, 0,
+      tz = "UTC"
+    ),
+    tz = "UTC"
+  )
+
+  keep_idx <- rep(TRUE, length(forcing_dt))
+
+  if (!is.null(start_dt)) {
+    keep_idx <- keep_idx & (forcing_dt >= start_dt)
+  }
+
+  if (!is.null(end_dt)) {
+    keep_idx <- keep_idx & (forcing_dt <= end_dt)
+  }
+
+  forcing_subset <- lapply(forcing, function(df) {
+    df[keep_idx, , drop = FALSE]
+  })
+
+  cat(sprintf(
+    "Subset forcing: %d timesteps (from %s to %s)\n",
+    sum(keep_idx),
+    min(forcing_dt[keep_idx]),
+    max(forcing_dt[keep_idx])
+  ))
+
+  forcing_subset
+}
+
+
+subset_upflow_dt <- function(upflow, start_dt = NULL, end_dt = NULL) {
+
+  lapply(upflow, function(df) {
+
+    if (is.null(df) || nrow(df) == 0) {
+      return(df)
+    }
+
+    upflow_dt <- as.POSIXct(
+      ISOdatetime(
+        df$year,
+        df$month,
+        df$day,
+        df$hour,
+        0, 0,
+        tz = "UTC"
+      ),
+      tz = "UTC"
+    )
+
+    keep_idx <- rep(TRUE, length(upflow_dt))
+
+    if (!is.null(start_dt)) {
+      keep_idx <- keep_idx & (upflow_dt >= start_dt)
+    }
+
+    if (!is.null(end_dt)) {
+      keep_idx <- keep_idx & (upflow_dt <= end_dt)
+    }
+
+    df[keep_idx, , drop = FALSE]
+  })
 }
 
 
@@ -480,31 +810,75 @@ uh2p_root <- function(scale, shape, dt_hours, toc) {
 #' data(tciSAKW1)
 #' flow_cfs <- uh(dt_hours, tciSAKW1, parsSAKW1)
 #' @useDynLib rfchydromodels duamel_
-uh <- function(dt_hours, tci, pars, sum_zones = TRUE, start_of_timestep = TRUE, backfill = TRUE) {
+uh <- function(dt_hours, tci, pars, sum_zones = TRUE, start_of_timestep = TRUE, 
+               backfill = TRUE, return_states = FALSE, uh_restart = NULL) {
+
+  
+  sec_per_day <- 86400
+    
   sec_per_day <- 86400
   dt_seconds <- sec_per_day / (24 / dt_hours)
   dt_days <- dt_seconds / sec_per_day
-
   n_zones <- ncol(tci)
   sim_length <- nrow(tci)
-
   k <- 1 # turns on 2 parameter UH
   m <- 1000 # max unit hydro
   n <- sim_length + m
-
+  
   flow_cfs <- if (sum_zones) numeric(sim_length) else tci
+  
+  # Storage for UH restart states
+  uh_restart_out <- list()
+  
   for (i in 1:n_zones) {
     shape <- pars[pars$name == "unit_shape", ]$value[i]
     toc_gis <- pars[pars$name == "unit_toc", ]$value[i]
     toc_adj <- pars[pars$name == "unit_toc_adj", ]$value[i]
-    # required to define either shape, toc and toc_adj or shape and scale
+    
     if (is.na(toc_gis) | is.na(toc_adj)) {
       scale <- pars[pars$name == "unit_scale", ]$value[i]
     } else {
       toc <- toc_gis * toc_adj
       scale <- uh2p_get_scale(shape, toc, 1)
     }
+    
+    # Prepare restart states
+    if (!is.null(uh_restart) && !is.null(uh_restart[[i]])) {
+      qprev <- as.single(uh_restart[[i]]$qprev)
+      use_qprev <- 1L
+    } else {
+      qprev <- as.single(numeric(m))
+      use_qprev <- 0L
+    }
+     
+#     print(qprev)
+      
+#     if (i == 1) {  # Zone 1
+#       cat("\n=== Before FORTRAN call (Zone 1) ===\n")
+#       cat("nrow(tci):", nrow(tci), "\n")
+#       cat("sim_length:", sim_length, "\n")
+#       cat("m:", m, "\n")
+#       cat("n:", n, "\n")
+#       cat("NQ (n - m):", n - m, "\n")
+#       cat("Last 5 TCI values:", tail(tci[,1], 5), "\n")
+#     }
+      
+#     if (i == 1) {  # Zone 1 only
+#       cat("\n=== Q array being passed to FORTRAN ===\n")
+#       cat("Length of tci[,1]:", length(tci[,1]), "\n")
+#       cat("First 5:", head(tci[,1], 5), "\n")
+#       cat("Last 10:", tail(tci[,1], 10), "\n")
+#       cat("Positions 30409-30418:", tci[30409:30418, 1], "\n")
+#       cat("Non-zero count:", sum(tci[,1] != 0), "\n")
 
+#       # Check the actual vector being created
+#       q_vec <- as.single(tci[, i])
+#       cat("\nAfter as.single conversion:\n")
+#       cat("Length:", length(q_vec), "\n")
+#       cat("Last 10:", tail(q_vec, 10), "\n")
+#       cat("Non-zero:", sum(q_vec != 0), "\n")
+#     }
+      
     routed <- .Fortran("duamel",
       tci = as.single(tci[, i]),
       as.single(shape),
@@ -514,39 +888,38 @@ uh <- function(dt_hours, tci, pars, sum_zones = TRUE, start_of_timestep = TRUE, 
       as.integer(m),
       1L,
       0L,
-      qr = as.single(numeric(n))
+      qr = as.single(numeric(n)),
+      qprev = qprev,
+      use_qprev = use_qprev,
+      qprev_out = as.single(numeric(m))
     )
+      
 
-    # convert to cfs
+    # Convert to cfs
     zone_flow <- routed$qr[1:sim_length] * 1000 * 3.28084**3 / dt_seconds *
       pars[pars$name == "zone_area", ]$value[i]
+    
     if (sum_zones) {
       flow_cfs <- flow_cfs + zone_flow
     } else {
       flow_cfs[, i] <- zone_flow
     }
+    
+    # Save restart state for this zone
+    uh_restart_out[[i]] <- list(
+      qprev = routed$qprev_out,
+      shape = shape,
+      scale = scale
+    )
   }
-
-  # if the forcing data used was beginning of time step,
-  # then the instantaneous output occurs at the end of the timestep
-  # so we need to shift the output ahead by one timestep relative
-  # to the focings
-  # !!CONSIDER REMOVING THE FORCING DATA BEGINNNING OF TIMESTEP ADJUSTMENT, SO THIS
-  # STOP CAN REMOVED AS WELL!!
-  if (start_of_timestep) {
-    if (sum_zones) {
-      c(
-        if (backfill) flow_cfs[1] else NA,
-        flow_cfs[1:(sim_length - 1)]
-      )
-    } else {
-      rbind(
-        if (backfill) flow_cfs[1, ] else NA,
-        flow_cfs[1:(sim_length - 1), ]
-      )
-    }
+  
+  if (return_states) {
+    return(list(
+      flow = flow_cfs,
+      restart = uh_restart_out
+    ))
   } else {
-    flow_cfs
+    return(flow_cfs)
   }
 }
 
@@ -682,13 +1055,20 @@ consuse <- function(input, pars, cfs = TRUE) {
 #'
 #' @examples NULL
 #' @useDynLib rfchydromodels lagk_
-lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FALSE) {
+lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FALSE,
+                 restart_c_array = NULL)  {
   sec_per_day <- 86400
   dt_seconds <- sec_per_day / (24 / dt_hours)
   dt_days <- dt_seconds / sec_per_day
-
   n_uptribs <- length(uptribs)
   sim_length <- nrow(uptribs[[1]])
+  
+
+# cat("\n=== Default Lag-K parameters ===\n")
+# cat("init_co:", pars[pars$name == "init_co", ]$value, "\n")
+# cat("init_if:", pars[pars$name == "init_if", ]$value, "\n")
+# cat("init_of:", pars[pars$name == "init_of", ]$value, "\n")
+# cat("init_stor:", pars[pars$name == "init_stor", ]$value, "\n")
 
   # lagk(n_hrus, ita, itb, &
   #      lagtbl_a_in, lagtbl_b_in, lagtbl_c_in, lagtbl_d_in,&
@@ -700,14 +1080,28 @@ lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FAL
   #      return_states, &
   #      lagk_out, co_st_out, &
   #      inflow_st_out,storage_st_out)
+    
+  # Determine if using C array restart
+  if (!is.null(restart_c_array)) {
+    use_c_array_restart <- 1L
+    c_array_in <- restart_c_array
+  } else {
+    use_c_array_restart <- 0L
+    c_array_in <- matrix(0, nrow=100, ncol=n_uptribs)  # Dummy array
+    # Still need initial parameters for pin7
+    ico_in <- pars[pars$name == "init_co", ]$value
+    iinfl_in <- pars[pars$name == "init_if", ]$value
+    ioutfl_in <- pars[pars$name == "init_of", ]$value
+    istor_in <- pars[pars$name == "init_stor", ]$value
+  }
 
   lagk_out <- matrix(0, sim_length, n_uptribs)
+  c_array_out <- matrix(0, 100, n_uptribs)
 
   routed <- .Fortran("lagk",
     n_hrus = as.integer(n_uptribs),
     ita = as.integer(dt_hours),
     itb = as.integer(dt_hours),
-    # meteng = as.character('METR'),
     lagtbl_a_in = pars[pars$name == "lagtbl_a", ]$value,
     lagtbl_b_in = pars[pars$name == "lagtbl_b", ]$value,
     lagtbl_c_in = pars[pars$name == "lagtbl_c", ]$value,
@@ -722,38 +1116,44 @@ lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FAL
     lagk_lagmin_in = pars[pars$name == "lagk_lagmin", ]$value,
     lagk_kmin_in = pars[pars$name == "lagk_kmin", ]$value,
     lagk_qmin_in = pars[pars$name == "lagk_qmin", ]$value,
-    ico_in = pars[pars$name == "init_co", ]$value,
-    iinfl_in = pars[pars$name == "init_if", ]$value,
-    ioutfl_in = pars[pars$name == "init_of", ]$value,
-    istor_in = pars[pars$name == "init_stor", ]$value,
+    ico_in = if(use_c_array_restart == 0) ico_in else numeric(n_uptribs),
+    iinfl_in = if(use_c_array_restart == 0) iinfl_in else numeric(n_uptribs),
+    ioutfl_in = if(use_c_array_restart == 0) ioutfl_in else numeric(n_uptribs),
+    istor_in = if(use_c_array_restart == 0) istor_in else numeric(n_uptribs),
+    c_array_in = c_array_in,
+    use_c_array_restart = use_c_array_restart,
     qa_in = do.call("cbind", lapply(uptribs, function(x) as.numeric(x[["flow_cfs"]]))),
     sim_length = as.integer(sim_length),
     return_states = as.logical(return_states),
     lagk_out = lagk_out,
     co_st_out = lagk_out,
     inflow_st_out = lagk_out,
-    storage_st_out = lagk_out
+    storage_st_out = lagk_out,
+    c_array_out = c_array_out
   )
 
+  
+  # Return c_array_out for saving
   if (isTRUE(return_states)) {
     return_vars <- c(
       "lagk_out" = "routed", "co_st_out" = "lag_time",
       "inflow_st_out" = "k_inflow", "storage_st_out" = "k_storage"
     )
-
-    df <- upflow[[1]][, c("year", "month", "day", "hour")]
-
+    df <- uptribs[[1]][, c("year", "month", "day", "hour")]
     for (i in 1:n_uptribs) {
       for (name in names(return_vars)) {
         df[[paste0(return_vars[name], "_", i)]] <- routed[[name]][, i]
       }
     }
+    attr(df, "c_array") <- routed$c_array_out  # Attach C array as attribute
     return(df)
+  }
+                    
     # df = as.data.frame(do.call('cbind',routed[return_vars]))
     # names(df) = paste0(gsub('_out','',return_vars),'_',1:n_uptribs)
 
     # return(cbind(upflow[[1]][,c('year','month','day','hour')],df))
-  }
+
   if (sum_routes & n_uptribs > 1) {
     return(apply(routed$lagk_out, 1, sum))
   } else if (n_uptribs > 1) {

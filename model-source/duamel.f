@@ -1,117 +1,123 @@
-      !      PRINT *,'DUAMEL'
-      !      PRINT *, UN1,UT,DT,Q(1),NU1,N,M,K,NTAU
-      !      PRINT *,'DUAMEL?'
- 
-      ! SUBROUTINE DUAMEL(Q,UN1,UT,DT,N,MM,K,NTAU,QB)
-      ! AWW adding documentation for input variables
-      ! Q      : TCI (total channel inflow) vector ... .ie unrouted
-      ! U1     : unit hydrograph vector
-      ! UN1    : unit hydrograph shape parameter (for gamma dist)
-      ! UT     : unit hydrograph scale parameter (for gamma dist)
-      ! DT     : timestep of the UH function (in days or fractions thereof)
-      ! N      : sim_length + uh_length ...ie length of U1
-      ! M      : max UH length?
-      ! QB     : routed flow vector
-      ! K      : 
-      ! NTAU   : 
-
-      ! AWW adding documentation for local variables
-      ! SP     : 
-
+C     Modified DUAMEL to support restart states
+C     New arguments:
+C       QPREV   - Previous Q values (M values) for warm start
+C       USE_QPREV - Flag: 1 = use QPREV for warm start, 0 = cold start
+C       QPREV_OUT - Output: last M values of Q for next restart
 C
-C===========================================================
-C
-C     THIS SUBROUTINE PERFORM UNIT HYDROGRAPH ROUTING
-C
-      SUBROUTINE DUAMEL(Q,UN1,UT,DT,N,MM,K,NTAU,QB)
+C     Modified DUAMEL - corrected restart logic
+C     Modified DUAMEL - cleaner restart logic
+C Modified DUAMEL - treating input as [QPREV|Q] concatenation
+      SUBROUTINE DUAMEL(Q,UN1,UT,DT,N,MM,K,NTAU,QB,
+     &                  QPREV,USE_QPREV,QPREV_OUT)
       IMPLICIT REAL (A-H,O-Z)
-      INTEGER A,B,M
+      INTEGER A,B,I,J,M,IOR
+      INTEGER N,MM,K,NTAU,USE_QPREV,M_SAVE
+      INTEGER NQ,QIDX
       
-      REAL, DIMENSION(N-MM), INTENT(IN) :: Q
-      REAL, INTENT(IN) :: UN1, UT, DT
-      INTEGER, INTENT(IN) :: N, MM, K, NTAU
-      REAL, DIMENSION(N), INTENT(OUT) :: QB
-
+      REAL Q(*), QB(*), QPREV(*), QPREV_OUT(*)
       REAL U1(MM)
-
-      !write(*,*) UN1,UT,DT,N,MM,K,NTAU
-      !U1 = 0
-
-      M = MM
-
-      IF(UN1 < 0)THEN
-        U1(1)=1.
+      REAL QVAL
+C
+      M  = MM
+      M_SAVE = MM
+      NQ = N - MM
+C
+C----- Build unit hydrograph (unchanged code)
+C
+      IF (UN1 .LT. 0.0) THEN
+        U1(1) = 1.0
         M = 1
-        GOTO 6
+        GO TO 60
       ELSE
-        IF (K .EQ. 0) GOTO 6
+        IF (K .EQ. 0) GOTO 60
       END IF
-      SP=0.
-      TOC=GF(UN1)
-      TOC=LOG(TOC*UT)
-      !write(*,*)'TOC: ',TOC
-      DO 1 I=1,M
-      TOP=I*DT/UT
-      TOR=(UN1-1)*LOG(TOP)-TOP-TOC
-      U1(I)=0.0
-      IF(TOR.GT.-8.) THEN
-        U1(I)=EXP(TOR)
-      ELSE
-        IF (I .GT. 1) THEN
-          U1(I) = 0.0
-          M = I
-          GO TO 12
+
+      SP = 0.0
+      TOC = GF(UN1)
+      TOC = LOG(TOC*UT)
+
+      DO 10 I=1,M
+        TOP = I*DT/UT
+        TOR = (UN1-1.0)*LOG(TOP) - TOP - TOC
+        U1(I) = 0.0
+        IF(TOR.GT.-8.0) THEN
+          U1(I) = EXP(TOR)
+        ELSE
+          IF (I .GT. 1) THEN
+            M = I
+            GO TO 20
+          END IF
         END IF
-      END IF
-      SP=SP+U1(I)
-    1 CONTINUE
-   12 CONTINUE
-      IF (SP .EQ. 0) SP=1.0E-5
-      SP=1./SP
-      DO 7 I=1,M
-      U1(I)=U1(I)*SP
-    7 CONTINUE
-      !do L=1,M
-      !  if (U1(L)>0)write(*,*)'U1',L,U1(L)
-      !end do 
-    6 CONTINUE
-      IOC=N+NTAU
-      IF(N.GT.M)GO TO 10
-      DO 2 I=1,IOC
-      QB(I)=0.
-      A=1
-      IF(I.GT.M)A=I-M+1
-      B=I
-      IF(I.GT.N)B=N
-      DO 3 J=A,B
-      IOR=I-J+1
-      !if(I.lt.10)write(*,*)QB(I)+U1(J)*Q(IOR)
-      QB(I)=QB(I)+Q(J)*U1(IOR)
-    3 CONTINUE
-    2 CONTINUE
-      GO TO 11
-   10 DO 4 I=1,IOC
-      QB(I)=0.
-      A=1
-      IF(I.GT.N)A=I-N+1
-      B=I
-      IF(I.GT.M)B=M
-      DO 5 J=A,B
-      IOR=I-J+1
-      !if(I.lt.10)write(*,*)QB(I)+U1(J)*Q(IOR)
-      QB(I)=QB(I)+U1(J)*Q(IOR)
- 5    CONTINUE
- 4    CONTINUE
- 11   RETURN
+        SP = SP + U1(I)
+   10 CONTINUE
+   20 CONTINUE
+
+      IF (SP .EQ. 0.0) SP = 1.0E-5
+      SP = 1.0/SP
+      DO 30 I=1,M
+        U1(I) = U1(I)*SP
+   30 CONTINUE
+
+   60 CONTINUE
+C
+C----- Convolution: conceptually convolving with [QPREV|Q]
+C     where QPREV has indices -M+1 to 0, Q has indices 1 to NQ
+C
+      IOC = N + NTAU
+
+      DO 100 I=1,IOC
+        QB(I) = 0.0
+        
+        DO 90 J=1,M
+          IOR = J
+          QIDX = I - J + 1
+          
+C         Determine which Q value to use
+          IF (QIDX .GE. 1 .AND. QIDX .LE. NQ) THEN
+C           Use current Q array
+            QVAL = Q(QIDX)
+          ELSE IF (QIDX .LE. 0 .AND. USE_QPREV .EQ. 1) THEN
+C           Use QPREV array (QIDX ranges from 0 down to -M+1)
+            QIDX = M_SAVE + QIDX
+            IF (QIDX .GE. 1 .AND. QIDX .LE. M_SAVE) THEN
+              QVAL = QPREV(QIDX)
+            ELSE
+              QVAL = 0.0
+            END IF
+          ELSE
+            QVAL = 0.0
+          END IF
+          
+          QB(I) = QB(I) + QVAL*U1(IOR)
+   90   CONTINUE
+  100 CONTINUE
+
+C
+C----- Save last M values of Q for restart
+C
+      DO 200 I=1,M_SAVE
+        IF (NQ - M_SAVE + I .GT. 0) THEN
+          QPREV_OUT(I) = Q(NQ - M_SAVE + I)
+        ELSE IF (USE_QPREV .EQ. 1) THEN
+          QIDX = I - (M_SAVE - NQ)
+          IF (QIDX .GE. 1 .AND. QIDX .LE. M_SAVE) THEN
+            QPREV_OUT(I) = QPREV(QIDX)
+          ELSE
+            QPREV_OUT(I) = 0.0
+          END IF
+        ELSE
+          QPREV_OUT(I) = 0.0
+        END IF
+  200 CONTINUE
+
+      RETURN
       END
-
-
+      
 C
 C=================================================================
 C
       FUNCTION GF(Y)
-      REAL, INTENT(IN)::Y
-      REAL::X,H,GF
+      REAL Y, X, H, GF
       GF=0.0
       H=1
       X=Y
