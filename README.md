@@ -18,7 +18,8 @@ This fork includes the following updates from the original project:
 
 ### Notes
 - Only tested in R using the provided example datasets.
-- Python version (`py-rfchydromodels`) not tested successfully due to Unit Hydrograph issues.
+- WARNING: Python version (`py-rfchydromodels`) not tested successfully due to Unit Hydrograph issues.
+- WARNING: Functionally equivalent to the original code for the test periods if in uh() start_of_timestep = FALSE, backfill = FALSE, which has to do with whether output flow data is shifted by one timestep to account for forcing data that uses beginning of timestep labeling. I am not sure what is the right thing. Should the forcing data be using the beginning of the time step and why is this in there? In this forked version this logic is taken out but that might be wrong
 
 ### Example Figures
 
