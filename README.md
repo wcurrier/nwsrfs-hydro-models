@@ -13,7 +13,7 @@ This fork includes the following updates from the original project:
 
 ### Testing
 - `tests/test_all.R` was used to validate the code by splitting the model halfway through simulation and checking if the simulated streamflow matched.
-- Individual tests were run on SAC-SMA/SNOW17, UH, and Lag-K components. Minor differences seem to occasionally appear.
+- Individual tests were run on SAC-SMA/SNOW17, UH, and Lag-K components. Very minor differences appeared in SAKW1 run but not the others. Potentially due to something in Lag-K.
 - Examples include full run (no restart/spin-up) and restart run (split at midpoints and restarted). Reproducible with `rfchydromodels/tests/test_all.R`.
 
 ### Notes
