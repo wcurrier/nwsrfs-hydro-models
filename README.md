@@ -21,14 +21,15 @@ This fork includes the following updates from the original project:
 - Python version (`py-rfchydromodels`) not tested successfully due to Unit Hydrograph issues.
 - Images or plots can be included using R Markdown code chunks, for example:
 
-```{r, echo=FALSE, out.width="70%"}
-knitr::include_graphics("https://raw.githubusercontent.com/wcurrier/nwsrfs-hydro-models/main/rfchydromodels/tests/figures/restart_zoom_week_SAKW1.png")
-**Figure 1.** Example of SAC-SMA/SNOW17 restart run for basin SAKW1 - Includes Lag-K routing.
+### Example Figures
 
-knitr::include_graphics("https://raw.githubusercontent.com/wcurrier/nwsrfs-hydro-models/main/rfchydromodels/tests/figures/restart_zoom_week_WCHW1.png")
-**Figure 2.** Example of SAC-SMA/SNOW17 restart run for basin WCHW1 - Does not include Lag-K Routing.
-```
+#### Basin SAKW1
+![Restart run for basin SAKW1](https://raw.githubusercontent.com/wcurrier/nwsrfs-hydro-models/main/rfchydromodels/tests/figures/restart_zoom_week_SAKW1.png)  
+**Figure 1.** Example of SAC-SMA/SNOW17 restart run for basin SAKW1 – Includes Lag-K routing.
 
+#### Basin WCHW1
+![Restart run for basin WCHW1](https://raw.githubusercontent.com/wcurrier/nwsrfs-hydro-models/main/rfchydromodels/tests/figures/restart_zoom_week_WCHW1.png)  
+**Figure 2.** Example of SAC-SMA/SNOW17 restart run for basin WCHW1 – Does not include Lag-K routing.
 
 
 # NWRFC Operational Hydrology Models 
