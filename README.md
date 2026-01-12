@@ -1,3 +1,31 @@
+## This Fork
+  
+This fork includes the following updates from the original project:
+
+### Overarching Goal
+- Enable SAC-SMA/SNOW17 to have **restart (warm-state) capability**, allowing Unit Hydrograph (UH) and Lag-K routing to continue from where they left off.
+- **Modified files**:
+  - `R/sac-snow-uh.R`: added restart functionality (highlighted changes are in `R/README.md`).
+  - Fortran source code: `sac-snow.f90`, `lagk_run.f90`, `duamel.f` (see comments in each file for changes).
+- **Spin-up functionality** is maintained if no restart data are provided.
+- Currently, only saves all states (SAC-SMA/SNOW17, Lag-K, UH) at the last time step.
+  *Future work*: optionally save all time steps for more detailed hindcast evaluation.
+
+### Testing
+- `tests/test_all.R` was used to validate the code by splitting the model halfway through simulation and checking if the simulated streamflow matched.
+- Individual tests were run on SAC-SMA/SNOW17, UH, and Lag-K components. Minor differences seem to occasionally appear.
+- Examples include full run (no restart/spin-up) and restart run (split at midpoints and restarted). Reproducible with `rfchydromodels/tests/test_all.R`.
+
+### Notes
+- Only tested in R using the provided example datasets.
+- Python version (`py-rfchydromodels`) not tested successfully due to Unit Hydrograph issues.
+- Images or plots can be included using R Markdown code chunks, for example:
+
+```{r, echo=FALSE, out.width="70%"}
+# Example placeholder
+knitr::include_graphics("rfchydromodels/tests/restart_zoom_week_SAKW1.png")
+```
+
 # NWRFC Operational Hydrology Models 
 
 ## Overview
