@@ -76,156 +76,6 @@ sac_snow_uh_lagk <- function(dt_hours, forcing, uptribs, pars) {
   total_flow_cfs
 }
 
-#' Execute SAC-SMA, SNOW17, UH, and Lag-K with full state and restart handling
-#'
-#' Runs the hydrologic model chain with optional warm-start capability for
-#' SAC-SMA/SNOW17, unit hydrograph routing, and Lag-K routing. Returns routed
-#' flow along with model state time series and restart objects.
-#'
-#' @param dt_hours timestep in hours
-#' @param forcing list of forcing data frames (one per zone)
-#' @param uptribs list of upstream tributary flow data frames
-#' @param pars parameter data frame
-#' @param restart_file optional SAC-SMA/SNOW17 restart CSV
-#' @param lagk_restart_file optional Lag-K restart RDS file
-#' @param uh_restart_file optional UH restart RDS file
-#' @param debug_components logical; include intermediate flow components
-#'
-#' @return A list containing:
-#' \describe{
-#'   \item{flow_cfs}{Total routed flow after channel loss}
-#'   \item{states}{Data frame of SAC-SMA/SNOW17 state time series}
-#'   \item{restart}{(optional) SAC-SMA/SNOW17 restart states}
-#'   \item{lagk_restart}{(optional) Lag-K restart C-array}
-#'   \item{uh_restart}{(optional) UH restart states}
-#' }
-#' @export
-sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars, 
-                                    restart_file = NULL, 
-                                    lagk_restart_file = NULL,
-                                    uh_restart_file = NULL,
-                                    debug_components = FALSE) {
-  
-  # ---- SAC-SMA + SNOW17 ----
-  sac_out <- sac_snow(
-    dt_hours,
-    forcing,
-    pars,
-    return_states = TRUE,
-    save_restart = TRUE,
-    restart_file = restart_file
-  )
-  
-  # Extract states and restart values
-  if (is.list(sac_out) && !is.null(sac_out$states)) {
-    states_df <- sac_out$states
-    restart_vals <- sac_out$restart
-  } else {
-    states_df <- sac_out
-    restart_vals <- NULL
-  }
-  
-  # ---- extract & combine per-zone TCI ----
-  tci_cols <- grep("^tci_", names(states_df), value = TRUE)
-  if (length(tci_cols) == 0) {
-    stop("No tci_* columns found in sac_snow output")
-  }
-  tci <- as.matrix(states_df[, tci_cols])
-  
-  # ---- Load UH restart states if provided ----
-  uh_restart <- NULL
-  if (!is.null(uh_restart_file) && file.exists(uh_restart_file)) {
-#     cat("Loading UH restart states from:", uh_restart_file, "\n")
-    uh_restart <- readRDS(uh_restart_file)  # Use RDS for complex R objects
-#     cat("Loaded UH restart states for", length(uh_restart), "zones\n")
-  }
-
-  # ---- UH routing (with restart states) ----
-  uh_result <- uh(
-    dt_hours, 
-    tci, 
-    pars,
-    return_states = TRUE,  # Always get states to save them
-    uh_restart = uh_restart
-  )
-    
-  flow_uh <- uh_result$flow
-  uh_restart_out <- uh_result$restart
-  
-  # ---- Load Lag-K restart states if provided ----
-  restart_c_array <- NULL
-  if (!is.null(lagk_restart_file) && file.exists(lagk_restart_file)) {
-    restart_c_array <- readRDS(lagk_restart_file)
-  }
-  
-  # ---- Lag-K routing (with restart states) ----
-  flow_lagk_result <- lagk(
-    dt_hours, 
-    uptribs, 
-    pars,
-    sum_routes = TRUE,
-    return_states = TRUE,
-    restart_c_array = restart_c_array
-  )
-  
-  # Extract routed flow
-  if (is.data.frame(flow_lagk_result)) {
-    lagk_routed_cols <- grep("^routed_", names(flow_lagk_result), value = TRUE)
-    if (length(lagk_routed_cols) > 0) {
-      lagk_flow <- rowSums(as.matrix(flow_lagk_result[, lagk_routed_cols, drop = FALSE]))
-    } else {
-      stop("No routed flow columns found in Lag-K output")
-    }
-    
-    # Save Lag-K restart state (the C array)
-    lagk_restart <- attr(flow_lagk_result, "c_array")
-      
-    # When saving (in sac_snow_uh_lagk_states):
-    if (!is.null(lagk_restart)) {
-      saveRDS(lagk_restart, "lagk_restart_split.rds")  # Changed from .csv to .rds
-    }
-    
-  } else {
-    lagk_flow <- flow_lagk_result
-    lagk_restart <- NULL
-  }
-    
-    
-  # ---- Channel loss ----
-  total_flow_cfs <- chanloss(
-    flow_uh + lagk_flow,
-    forcing,
-    dt_hours,
-    pars
-  )
-  
-  # ---- Build result ----
-  result <- list(
-    flow_cfs = total_flow_cfs,
-    states = states_df
-  )
-  
-  # Add debug components if requested
-  if (debug_components) {
-    result$flow_uh <- flow_uh
-    result$flow_lagk <- lagk_flow
-    result$flow_before_chanloss <- flow_uh + lagk_flow
-  }
-  
-  # Add restart states
-  if (!is.null(restart_vals)) {
-    result$restart <- restart_vals
-  }
-  if (!is.null(lagk_restart)) {
-    result$lagk_restart <- lagk_restart
-  }
-  if (!is.null(uh_restart_out)) {
-    result$uh_restart <- uh_restart_out
-  }
-  
-  return(result)
-}
-
 #' Execute SAC-SMA, SNOW17, return total channel inflow per zone, and model states
 #' Convenience wrapper around sac_snow(..., return_states = TRUE).
 #'
@@ -273,7 +123,6 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
                      save_restart = FALSE, restart_file = NULL) {
   return_states <- as.integer(return_states)
   save_restart <- as.integer(save_restart)
-  
   pars <- as.data.frame(pars)
 
   sec_per_day <- 86400
@@ -282,6 +131,7 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
   n_zones <- length(forcing)
   sim_length <- nrow(forcing[[1]])
 
+  # WRC: Adding restart functionality
   # Check if we're doing a warm start
   use_restart <- FALSE
   restart_uztwc_in <- numeric(n_zones)
@@ -326,6 +176,7 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
     
   output_matrix <- matrix(0, nrow = sim_length, ncol = n_zones)
 
+  # Restructure state variables to be put into fortran code
   tci    <- matrix(0, nrow = sim_length, ncol = n_zones)
   aet    <- matrix(0, nrow = sim_length, ncol = n_zones)
   uztwc  <- matrix(0, nrow = sim_length, ncol = n_zones)
@@ -347,7 +198,8 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
   raim   <- matrix(0, nrow = sim_length, ncol = n_zones)
   psfall <- matrix(0, nrow = sim_length, ncol = n_zones)
   prain  <- matrix(0, nrow = sim_length, ncol = n_zones)
-    
+
+ 
   sac_pars <- rbind(
     pars[pars$name == "uztwm", ]$value,
     pars[pars$name == "uzfwm", ]$value,
@@ -396,7 +248,7 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
   stopifnot(dim(mat_mat)   == c(sim_length, n_zones))
   stopifnot(dim(etd_mat)   == c(sim_length, n_zones))
 
-  # Initialize the new restart output matrices
+  # WRC: Initialize the new restart output matrices
   restart_uztwc <- numeric(n_zones)
   restart_uzfwc <- numeric(n_zones)
   restart_lztwc <- numeric(n_zones)
@@ -522,6 +374,159 @@ format_states <- function(x) {
   }
   df
 }
+
+
+#' Execute SAC-SMA, SNOW17, UH, and Lag-K with full state and restart handling
+#'
+#' Runs the hydrologic model chain with optional warm-start capability for
+#' SAC-SMA/SNOW17, unit hydrograph routing, and Lag-K routing. Returns routed
+#' flow along with model state time series and restart objects.
+#'
+#' @param dt_hours timestep in hours
+#' @param forcing list of forcing data frames (one per zone)
+#' @param uptribs list of upstream tributary flow data frames
+#' @param pars parameter data frame
+#' @param restart_file optional SAC-SMA/SNOW17 restart CSV
+#' @param lagk_restart_file optional Lag-K restart RDS file
+#' @param uh_restart_file optional UH restart RDS file
+#' @param debug_components logical; include intermediate flow components
+#'
+#' @return A list containing:
+#' \describe{
+#'   \item{flow_cfs}{Total routed flow after channel loss}
+#'   \item{states}{Data frame of SAC-SMA/SNOW17 state time series}
+#'   \item{restart}{(optional) SAC-SMA/SNOW17 restart states}
+#'   \item{lagk_restart}{(optional) Lag-K restart C-array}
+#'   \item{uh_restart}{(optional) UH restart states}
+#' }
+#' @export
+sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars, 
+                                    restart_file = NULL, 
+                                    lagk_restart_file = NULL,
+                                    uh_restart_file = NULL,
+                                    debug_components = FALSE) {
+  
+  # ---- SAC-SMA + SNOW17 ----
+  sac_out <- sac_snow(
+    dt_hours,
+    forcing,
+    pars,
+    return_states = TRUE,
+    save_restart = TRUE,
+    restart_file = restart_file
+  )
+  
+  # Extract states and restart values
+  if (is.list(sac_out) && !is.null(sac_out$states)) {
+    states_df <- sac_out$states
+    restart_vals <- sac_out$restart
+  } else {
+    states_df <- sac_out
+    restart_vals <- NULL
+  }
+  
+  # ---- extract & combine per-zone TCI (Total Channel Input) ----
+  tci_cols <- grep("^tci_", names(states_df), value = TRUE)
+  if (length(tci_cols) == 0) {
+    stop("No tci_* columns found in sac_snow output")
+  }
+  tci <- as.matrix(states_df[, tci_cols])
+  
+  # ---- Load UH (Unit Hydrograph) restart states if provided ----
+  uh_restart <- NULL
+  if (!is.null(uh_restart_file) && file.exists(uh_restart_file)) {
+#     cat("Loading UH restart states from:", uh_restart_file, "\n")
+    uh_restart <- readRDS(uh_restart_file)  # Use RDS for complex R objects
+#     cat("Loaded UH restart states for", length(uh_restart), "zones\n")
+  }
+
+  # ---- UH routing (with restart states) ----
+  uh_result <- uh(
+    dt_hours, 
+    tci, 
+    pars,
+    return_states = TRUE,  # Always get states to save them
+    uh_restart = uh_restart
+  )
+    
+  flow_uh <- uh_result$flow
+  uh_restart_out <- uh_result$restart
+  
+  # ---- Load Lag-K restart states if provided ----
+  restart_c_array <- NULL
+  if (!is.null(lagk_restart_file) && file.exists(lagk_restart_file)) {
+    restart_c_array <- readRDS(lagk_restart_file)
+  }
+  
+  # ---- Lag-K routing (with restart states) ----
+  flow_lagk_result <- lagk(
+    dt_hours, 
+    uptribs, 
+    pars,
+    sum_routes = TRUE,
+    return_states = TRUE,
+    restart_c_array = restart_c_array
+  )
+  
+  # Extract routed flow
+  if (is.data.frame(flow_lagk_result)) {
+    lagk_routed_cols <- grep("^routed_", names(flow_lagk_result), value = TRUE)
+    if (length(lagk_routed_cols) > 0) {
+      lagk_flow <- rowSums(as.matrix(flow_lagk_result[, lagk_routed_cols, drop = FALSE]))
+    } else {
+      stop("No routed flow columns found in Lag-K output")
+    }
+    
+    # Save Lag-K restart state (the C array)
+    lagk_restart <- attr(flow_lagk_result, "c_array")
+      
+    # When saving (in sac_snow_uh_lagk_states):
+    if (!is.null(lagk_restart)) {
+      saveRDS(lagk_restart, "lagk_restart_split.rds")  # Changed from .csv to .rds
+    }
+    
+  } else {
+    lagk_flow <- flow_lagk_result
+    lagk_restart <- NULL
+  }
+    
+    
+  # ---- Channel loss ----
+  total_flow_cfs <- chanloss(
+    flow_uh + lagk_flow,
+    forcing,
+    dt_hours,
+    pars
+  )
+  
+  # ---- Build result ----
+  result <- list(
+    flow_cfs = total_flow_cfs,
+    states = states_df
+  )
+  
+  # Add debug components if requested
+  if (debug_components) {
+    result$flow_uh <- flow_uh
+    result$flow_lagk <- lagk_flow
+    result$flow_before_chanloss <- flow_uh + lagk_flow
+  }
+  
+  # Add restart states
+  if (!is.null(restart_vals)) {
+    result$restart <- restart_vals
+  }
+  if (!is.null(lagk_restart)) {
+    result$lagk_restart <- lagk_restart
+  }
+  if (!is.null(uh_restart_out)) {
+    result$uh_restart <- uh_restart_out
+  }
+  
+  return(result)
+}
+
+
 
 #' Subset forcing data by date range
 #'
@@ -808,14 +813,11 @@ uh2p_root <- function(scale, shape, dt_hours, toc) {
 #'                  kept separate and returned as a matrix
 #' @param start_of_timestep should the output flow data be shifted by one timestep to account for
 #'                          forcing data that uses beginning of timestep labeling
-#' @param backfill when start_of_timestep is TRUE, should the first value be duplicated
-#' @param return_states logical; return UH restart states
 #' @param uh_restart optional list of UH restart states from a previous run
 #' @return Vector of routed flow in cfs
 #' If `return_states = FALSE`, routed flow (vector or matrix).
 #' If `return_states = TRUE`, a list with elements `flow` and `restart`.
 #' @export
-#'
 #' @examples
 #' data(forcingSAKW1)
 #' data(parsSAKW1)
@@ -826,15 +828,21 @@ uh2p_root <- function(scale, shape, dt_hours, toc) {
 #' data(tciSAKW1)
 #' flow_cfs <- uh(dt_hours, tciSAKW1, parsSAKW1)
 #' @useDynLib rfchydromodels duamel_
-uh <- function(dt_hours, tci, pars, sum_zones = TRUE, start_of_timestep = TRUE, 
-               backfill = TRUE, return_states = FALSE, uh_restart = NULL) {
+# -------------------------------------------------------------------------
+# WRC (Jan 2026) Updates relative to previous uh():
+# - Added support for warm-starting UH routing via qprev restart states
+# - Optionally returns UH restart states for continuation across runs
+# - Core routing behavior and parameter handling remain unchanged
+# - Removed output time shifting for start-of-timestep forcing; UH output
+#   is now aligned with the input timestep index
+# -------------------------------------------------------------------------
+uh <- function(dt_hours, tci, pars, sum_zones = TRUE, return_states = FALSE, uh_restart = NULL) {
     
   sec_per_day <- 86400
   dt_seconds <- sec_per_day / (24 / dt_hours)
   dt_days <- dt_seconds / sec_per_day
   n_zones <- ncol(tci)
   sim_length <- nrow(tci)
-  k <- 1 # turns on 2 parameter UH
   m <- 1000 # max unit hydro
   n <- sim_length + m
   
@@ -855,7 +863,7 @@ uh <- function(dt_hours, tci, pars, sum_zones = TRUE, start_of_timestep = TRUE,
       scale <- uh2p_get_scale(shape, toc, 1)
     }
     
-    # Prepare restart states
+    # Prepare UH restart state (qprev) if provided; otherwise initialize empty
     if (!is.null(uh_restart) && !is.null(uh_restart[[i]])) {
       qprev <- as.single(uh_restart[[i]]$qprev)
       use_qprev <- 1L
@@ -890,8 +898,8 @@ uh <- function(dt_hours, tci, pars, sum_zones = TRUE, start_of_timestep = TRUE,
     } else {
       flow_cfs[, i] <- zone_flow
     }
-    
-    # Save restart state for this zone
+      
+    # Store UH restart state for this zone (used for warm starts in future runs)
     uh_restart_out[[i]] <- list(
       qprev = routed$qprev_out,
       shape = shape,
@@ -1031,7 +1039,8 @@ consuse <- function(input, pars, cfs = TRUE) {
 #' Lag-K Routing for any number of upstream points
 #'
 #' @param dt_hours timestep in hours
-#' @param uptribs a matrix where each column contains flow data (in cfs) for an upstream point
+#' @param uptribs list of data frames, one per upstream point, each containing
+#'        a `flow_cfs` column and time fields
 #' @param pars parameters
 #' @param sum_routes add all routed values together or leave separate
 #' @param return_states return the lagk states
@@ -1045,6 +1054,13 @@ consuse <- function(input, pars, cfs = TRUE) {
 #'
 #' @examples NULL
 #' @useDynLib rfchydromodels lagk_
+# -------------------------------------------------------------------------
+# WRC (Jan 2026) Updates relative to previous lagk():
+# - Added support for warm-starting Lag-K routing via C-array restart states
+# - Optionally returns Lag-K restart data for continuation across runs
+# - Fixed use of `uptribs` instead of undefined `upflow`
+# - Core routing behavior and parameter handling remain unchanged
+# -------------------------------------------------------------------------
 lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FALSE,
                  restart_c_array = NULL)  {
   sec_per_day <- 86400
@@ -1052,25 +1068,7 @@ lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FAL
   dt_days <- dt_seconds / sec_per_day
   n_uptribs <- length(uptribs)
   sim_length <- nrow(uptribs[[1]])
-  
 
-# cat("\n=== Default Lag-K parameters ===\n")
-# cat("init_co:", pars[pars$name == "init_co", ]$value, "\n")
-# cat("init_if:", pars[pars$name == "init_if", ]$value, "\n")
-# cat("init_of:", pars[pars$name == "init_of", ]$value, "\n")
-# cat("init_stor:", pars[pars$name == "init_stor", ]$value, "\n")
-
-  # lagk(n_hrus, ita, itb, &
-  #      lagtbl_a_in, lagtbl_b_in, lagtbl_c_in, lagtbl_d_in,&
-  #      ktbl_a_in, ktbl_b_in, ktbl_c_in, ktbl_d_in, &
-  #      lagk_lagmax_in, lagk_kmax_in, lagk_qmax_in, &
-  #      lagk_lagmin_in, lagk_kmin_in, lagk_qmin_in, &
-  #      ico_in, iinfl_in, ioutfl_in, istor_in, &
-  #      qa_in, sim_length, &
-  #      return_states, &
-  #      lagk_out, co_st_out, &
-  #      inflow_st_out,storage_st_out)
-    
   # Determine if using C array restart
   if (!is.null(restart_c_array)) {
     use_c_array_restart <- 1L
@@ -1139,10 +1137,6 @@ lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FAL
     return(df)
   }
                     
-    # df = as.data.frame(do.call('cbind',routed[return_vars]))
-    # names(df) = paste0(gsub('_out','',return_vars),'_',1:n_uptribs)
-
-    # return(cbind(upflow[[1]][,c('year','month','day','hour')],df))
 
   if (sum_routes & n_uptribs > 1) {
     return(apply(routed$lagk_out, 1, sum))
