@@ -22,9 +22,14 @@ This fork includes the following updates from the original project:
 - Images or plots can be included using R Markdown code chunks, for example:
 
 ```{r, echo=FALSE, out.width="70%"}
-# Example placeholder
-knitr::include_graphics("nwsrfs-hydro-models/rfchydromodels/tests/figures/restart_zoom_week_SAKW1.png")
+knitr::include_graphics("https://raw.githubusercontent.com/wcurrier/nwsrfs-hydro-models/main/rfchydromodels/tests/figures/restart_zoom_week_SAKW1.png")
+**Figure 1.** Example of SAC-SMA/SNOW17 restart run for basin SAKW1 - Includes Lag-K routing.
+
+knitr::include_graphics("https://raw.githubusercontent.com/wcurrier/nwsrfs-hydro-models/main/rfchydromodels/tests/figures/restart_zoom_week_WCHW1.png")
+**Figure 2.** Example of SAC-SMA/SNOW17 restart run for basin WCHW1 - Does not include Lag-K Routing.
 ```
+
+
 
 # NWRFC Operational Hydrology Models 
 
