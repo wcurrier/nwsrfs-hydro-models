@@ -23,7 +23,8 @@ This fork includes the following updates from the original project:
 
 ```{r, echo=FALSE, out.width="70%"}
 # Example placeholder
-knitr::include_graphics("rfchydromodels/tests/figures/restart_zoom_week_SAKW1.png")
+knitr::include_graphics("rfchydromodels/tests
+/figures/restart_zoom_week_SAKW1.png")
 ```
 
 # NWRFC Operational Hydrology Models 
