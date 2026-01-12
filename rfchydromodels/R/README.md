@@ -1,4 +1,4 @@
-# SAC-SNOW-UH Routing Updates
+# sac-snow-uh.R Updates
 
 This directory contains updates to the **SAC-SMA / SNOW17 hydrologic modeling and routing workflow**, with a focus on adding **restart (warm-state) capability** and improving the robustness of **Unit Hydrograph (UH)** and **Lag-K routing**.
 
