@@ -458,7 +458,10 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
     restart_c_array <- readRDS(lagk_restart_file)
   }
   
+    
   # ---- Lag-K routing (with restart states) ----
+  if (!is.null(uptribs)) {
+
   flow_lagk_result <- lagk(
     dt_hours, 
     uptribs, 
@@ -489,7 +492,14 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
     lagk_flow <- flow_lagk_result
     lagk_restart <- NULL
   }
-    
+
+  } else {
+    # No upstream tributaries → skip Lag-K
+    lagk_flow <- 0
+    lagk_restart <- NULL
+  }
+
+ 
     
   # ---- Channel loss ----
   total_flow_cfs <- chanloss(
