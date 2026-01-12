@@ -1,3 +1,21 @@
+! !     ==============================================================================
+! !     WRC MODIFICATION NOTES - RESTART CAPABILITY ADDITIONS (January 2026)
+! !     ==============================================================================
+! !     The following modifications enable model restart/warm start capabilities
+! !     for forecasting applications. Changes allow the model to:
+! !     - Bypass spin-up period when restart states are provided
+! !     - Initialize directly from saved states
+! !     - Continue model runs from previous endpoints
+! !     - Support forecasting workflows
+! !     
+! !     Key additions:
+! !     1. New input arguments: use_restart flag and restart_*_in states
+! !     2. New output arguments: save_restart flag and restart_* output states
+! !     3. Conditional spin-up bypass logic
+! !     4. SNOW17 carryover array initialization from restart
+! !     5. Final state capture at simulation end
+! !     ==============================================================================
+
 subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
     latitude, elev, &
     sac_pars, &
@@ -45,12 +63,21 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
 ! !     map, ptps, mat,etd: (double array):  precipitation as mm, precent precipitation as snow as decimal,
 ! !                                          temperature as DegC, and evaporation demand as mm (double array)
 ! !     return_states: option to return SNOW17 and SAC-SMA states array or return TCI only(logical)
+! !     save_restart: (logical) WRC: flag to save final states for restart capability
+! !     use_restart: (logical) WRC: flag to use provided restart states and bypass spin-up
+! !     restart_uztwc_in, etc.: (double array) WRC: SAC-SMA restart states (6 per HRU)
+! !     restart_cs_in: (double array) WRC: SNOW17 carryover array (19 elements per HRU)
+! !     restart_taprev_in: (double array) WRC: Previous air temperature for SNOW17
+
 ! !     OUTPUTS
 ! !     tci:  total channel inflow for each zone in mm (double array)
 ! !     aet:  actual evapotranspiration for each zone as mm (double array)
 ! !     uztwc, uzfwc, lztwc, lzfsc, lzfpc, adimc:  SAC-SMA content or state for each zone as mm (double array)
 ! !     roimp, sdro, ssur, sif, bfs, bfp:  tci contribution from each SAC-SMA runoff source form each zone
 ! !     swe, aesc, neghs, liqw, raim, psfall, prain:  Snow17 state for each zone (double array)
+! !     restart_uztwc, etc.: (double array) WRC: Final SAC-SMA states for restart (6 per HRU)
+! !     restart_cs: (double array) WRC: Final SNOW17 carryover array (19 per HRU)
+! !     restart_taprev: (double array) WRC: Final air temperature for restart
 
     ! ! zone info 
     ! latitude, elev, &
@@ -73,31 +100,33 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
   implicit none
 
   ! Add declarations
-  logical, intent(in) :: use_restart
-  double precision, dimension(n_hrus), intent(in) :: &
-          restart_uztwc_in, restart_uzfwc_in, restart_lztwc_in, &
-          restart_lzfsc_in, restart_lzfpc_in, restart_adimc_in, &
-          restart_taprev_in
-  double precision, dimension(19,n_hrus), intent(in) :: restart_cs_in
-  
-
   double precision, parameter:: pi=3.141592653589793238462643383279502884197d0
   double precision, parameter:: sec_day = 86400.     !seconds in a day
   double precision, parameter:: sec_hour = 3600.     !seconds in an hour
   integer, parameter:: sp = KIND(1.0)
   integer:: k
+  
+  ! ===== RESTART CAPABILITY VARIABLE DECLARATIONS (BEGIN) =====
+  logical, intent(in) :: use_restart ! NEW - flag to use restart states instead of spin-up
+  double precision, dimension(n_hrus), intent(in) :: & 
+          restart_uztwc_in, restart_uzfwc_in, restart_lztwc_in, & ! SAC-SMA restart inputs
+          restart_lzfsc_in, restart_lzfpc_in, restart_adimc_in, &
+          restart_taprev_in  ! SNOW17 temperature restart input
+  double precision, dimension(19,n_hrus), intent(in) :: restart_cs_in ! NEW - SNOW17 restart inputs
 
   logical, intent(in) :: return_states
-  logical, intent(in) :: save_restart
-  
-  ! Restart (carryover) outputs
-  double precision, dimension(n_hrus), intent(out) :: &
-          restart_uztwc, restart_uzfwc, restart_lztwc, restart_lzfsc, &
-          restart_lzfpc, restart_adimc
+  logical, intent(in) :: save_restart !: Flag to save states at end for restart
 
-  double precision, dimension(19,n_hrus), intent(out) :: restart_cs
-  double precision, dimension(n_hrus), intent(out) :: restart_taprev
-  
+  ! Restart Outputs
+  double precision, dimension(n_hrus), intent(out) :: &
+          restart_uztwc, restart_uzfwc, restart_lztwc, restart_lzfsc, & ! WRC: NEW - SAC-SMA restart outputs
+          restart_lzfpc, restart_adimc
+          
+  ! SNOW17 restart outputs
+  double precision, dimension(19,n_hrus), intent(out) :: restart_cs ! SNOW17 carryover array restart output
+  double precision, dimension(n_hrus), intent(out) :: restart_taprev ! SNOW17 temperature restart output
+  ! ===== RESTART CAPABILITY VARIABLE DECLARATIONS (END) =====
+
   integer, intent(in):: n_hrus ! number of zones
 
   ! sac pars matrix 
@@ -290,6 +319,10 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
   
     ! =============== Initialize states =====================================
 
+    ! WRC: ===== CONDITIONAL SPIN-UP BYPASS FOR RESTART (BEGIN) =====
+    ! WRC: If restart states are provided, use them directly and skip spin-up
+    ! WRC: This enables forecasting workflows and continuation of previous runs
+    
     if (use_restart) then
       ! Use provided restart states (warm start)
       init_uztwc(nh) = restart_uztwc_in(nh)
@@ -299,7 +332,7 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
       init_lzfpc(nh) = restart_lzfpc_in(nh)
       init_adimc(nh) = restart_adimc_in(nh)
 
-      ! Skip spin-up entirely
+      ! Skip spin-up entirely when using restart states
     else
       ! =============== Spin up procedure =====================================
 
@@ -422,7 +455,8 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
 
       ! =============== End spin up procedure =====================================
 
-    end if  ! <-- ADD THIS: closes the if (use_restart) block
+    end if  ! End of use_restart conditional
+    ! WRC: ===== CONDITIONAL SPIN-UP BYPASS FOR RESTART (END) =====
 
     ! =============== Set initial states for simulation =====================================
 
@@ -434,12 +468,17 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
     lzfpc_sp = real(init_lzfpc(nh))
     adimc_sp = real(init_adimc(nh))
 
+    ! WRC: ===== SNOW17 STATE INITIALIZATION FROM RESTART (BEGIN) =====
+    ! WRC: Initialize SNOW17 carryover array from restart states if available
+    ! WRC: The cs array contains: WE, neghs, liqw, lagged temps, accumulated WE, lagged outflows
+
     ! Initialize SNOW17 states
     if (use_restart) then
+      ! WRC: Load complete SNOW17 state from restart file
       cs(:) = real(restart_cs_in(:,nh))
       taprev_sp = real(restart_taprev_in(nh))
 
-      ! DEBUG: Print what we loaded
+      ! WRC: DEBUG - Optional diagnostic output for first zone
       if (nh == 1) then
         write(*,*) 'Loaded restart cs for zone 1:'
         write(*,*) '  cs(1):', cs(1)
@@ -448,10 +487,12 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
         write(*,*) '  cs(11-13):', cs(11), cs(12), cs(13)
       end if
     else
+      ! WRC: Original cold start initialization
       cs(1) = real(init_swe(nh))
       cs(2:19) = 0.0
       taprev_sp = real(mat(1,nh))
     end if
+    ! WRC: ===== SNOW17 STATE INITIALIZATION FROM RESTART (END) =====
 
 
     psfall_sp = real(0)
@@ -551,19 +592,24 @@ subroutine sacsnow(n_hrus, dt, sim_length, year, month, day, hour, &
 
         swe(i,nh) = dble(cs(1))+dble(cs(3))+dble(cs(9))+TEX
       end if
-      
-      ! At the final timestep only:
+
+      ! WRC: ===== SAVE FINAL STATES FOR RESTART (BEGIN) =====
+      ! WRC: Capture model states at final timestep for use in subsequent runs
+      ! WRC: Only executes when save_restart=True and at final timestep to minimize overhead
       if (save_restart .and. i == sim_length) then
+        ! WRC: Save SAC-SMA states
         restart_uztwc(nh) = dble(uztwc_sp)
         restart_uzfwc(nh) = dble(uzfwc_sp)
         restart_lztwc(nh) = dble(lztwc_sp)
         restart_lzfsc(nh) = dble(lzfsc_sp)
         restart_lzfpc(nh) = dble(lzfpc_sp)
         restart_adimc(nh) = dble(adimc_sp)
-
+        
+        ! WRC: Save SNOW17 carryover states
         restart_cs(:,nh) = dble(cs(:))
         restart_taprev(nh) = dble(taprev_sp)
       end if
+      ! WRC: ===== SAVE FINAL STATES FOR RESTART (END) =====
 
 
       
