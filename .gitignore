@@ -13,9 +13,6 @@ out.txt
 
 # R outputs
 Rplots.pdf
-*.png
-*.csv
-*.rds
 
 # Model outputs
 rfchydromodels/flow_*

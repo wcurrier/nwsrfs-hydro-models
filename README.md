@@ -19,7 +19,6 @@ This fork includes the following updates from the original project:
 ### Notes
 - Only tested in R using the provided example datasets.
 - Python version (`py-rfchydromodels`) not tested successfully due to Unit Hydrograph issues.
-- Images or plots can be included using R Markdown code chunks, for example:
 
 ### Example Figures
 
