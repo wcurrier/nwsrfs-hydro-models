@@ -67,7 +67,7 @@ restart behavior:
 - Lag-K restart behavior is incomplete and may introduce errors.
 - Python interfaces have not yet been fully validated with the new snapshot
   and restart features.
-
+- **WARNING:** For the test periods, results are functionally equivalent to the original code when uh() is run with start_of_timestep = FALSE and backfill = FALSE. These options control whether output flows are shifted by one timestep to account for forcing data labeled at the beginning of the timestep. The correct convention for this behavior is unclear. In this fork, the timestep-shifting logic has been removed, which may be incorrect.
 
 ### Example Figures
 
