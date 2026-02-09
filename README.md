@@ -1,6 +1,4 @@
 ## This Fork
-  
-## This Fork
 
 This fork extends the original project to support **restartable and snapshot-based hydrologic modeling workflows**, with a focus on reforecasting and ensemble applications.
 
