@@ -1,8 +1,17 @@
 C MODULE FLAG7
 C-----------------------------------------------------------------------
 C
-CGW      SUBROUTINE FLAG7 (P,C,QA,QB,QT,NDT,COTIME,IB)
-      SUBROUTINE FLAG7 (P,C,QA,QB,NDT,CO_ST)
+C     FIX (Feb 2026): QT is now passed as an argument from the caller.
+C     This avoids ALLOCATABLE which caused free()/malloc() ABI conflicts
+C     between the system gfortran (which compiles this file) and the
+C     conda gfortran (which compiles lagk_run.f90 and links everything).
+C     The caller (lagk_run.f90) allocates QT once with the correct size
+C     and passes it in for each call.
+C
+C     Original NWSRFS interface also had QT as a parameter:
+C       SUBROUTINE FLAG7 (P,C,QA,QB,QT,NDT,COTIME,IB)
+C
+      SUBROUTINE FLAG7 (P,C,QA,QB,NDT,CO_ST,QT,NQTSZ)
 C.......................................................................
 C
 C     THIS SUBROUTINE CONTROLS THE LAG OPERATION.
@@ -20,11 +29,10 @@ C        1. P      - THE P ARRAY
 C        2. C      - THE C ARRAY
 C        3. QA     - THE INFLOW TIME SERIES
 C        4. QB     - THE LAGGED OUTFLOW TIME SERIES
-C        5. QT     - WORK SPACE
-C        6. NDT    - THE NUMBER OF TIME STEPS TO BE EXECUTED
-C        7. COTIME - TIME (IN HOURS RELATIVE TO START OF RUN)
-C                    AT WHICH CARRYOVER WILL BE SAVED
-C        8. IB     - PRINT DEBUG FLAG, PRINT IF IB = 1
+C        5. NDT    - THE NUMBER OF TIME STEPS TO BE EXECUTED
+C        6. CO_ST  - CARRY OVER STATE TIME SERIES
+C        7. QT     - WORK SPACE (allocated by caller, min 500 elements)
+C        8. NQTSZ  - SIZE OF QT ARRAY
 C.......................................................................
 C
 CFC      INCLUDE 'common/ionum'
@@ -39,8 +47,14 @@ CFC      INCLUDE 'common/fcpuck'
       COMMON/RESLAG/IGAGE,TLAG(2)
 C
 CGW      DIMENSION P(1),C(1),QA(1),QB(1),QT(1),CONLQ(2)
-      INTEGER NDT, IB
-      REAL QB(NDT),QA(NDT),QT(NDT*3)
+      INTEGER NDT, IB, NQTSZ
+      REAL QB(NDT),QA(NDT)
+C
+C     QT is now passed in by the caller with size NQTSZ.
+C     Minimum size must be 500 (for carryover pairs when NDT=1).
+C     For full time series, caller should pass NDT*3 or larger.
+C
+      REAL QT(NQTSZ)
       DIMENSION P(*),C(*),CONLQ(2)
 CGW   ADDING ARRAYS TO TRACK CARRY OVER TIME
       REAL, DIMENSION(NDT) :: CO_ST
@@ -61,6 +75,10 @@ C    ===================================================================
 C
 CCB      DATA ICPU/4HCPU /
 C
+C     Zero the work array
+      DO 1 I=1,NQTSZ
+        QT(I) = 0.0
+    1 CONTINUE
 C
       NOTCPU=.TRUE.
 C
