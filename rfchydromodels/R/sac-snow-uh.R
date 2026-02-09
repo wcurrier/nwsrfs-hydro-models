@@ -102,7 +102,6 @@ sac_snow_states <- function(dt_hours, forcing, pars) {
 #' @param forcing data frame with with columns for forcing inputs
 #' @param pars sac parameters
 #' @param return_states logical value indicating if the states should be output as well as the tci
-#' @param return_states logical; return full model state time series
 #' @param save_restart logical; return end-of-run restart states
 #' @param restart_file optional CSV file of restart states for warm start
 #' @return data.frame (1 column per zone) of unrouted channel inflow (tci), sac states
@@ -110,7 +109,7 @@ sac_snow_states <- function(dt_hours, forcing, pars) {
 #' and adjusted forcing data.
 #' If `return_states = FALSE`, a matrix of total channel inflow (tci).
 #' If `return_states = TRUE`, a data frame of model states.
-#' If `save_restart = TRUE`, a list with elements `states` and `restart`.
+#' If `save_restart = TRUE`, a list with elements `states`, `restart`, `cs_ts`, and `taprev_ts`.
 #' @export
 #'
 #' @examples
@@ -119,7 +118,7 @@ sac_snow_states <- function(dt_hours, forcing, pars) {
 #' dt_hours <- 6
 #' flow <- sac_snow(dt_hours, forcingSAKW1, parsSAKW1)
 #' @useDynLib rfchydromodels sacsnow_
-sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE, 
+sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
                      save_restart = FALSE, restart_file = NULL) {
   return_states <- as.integer(return_states)
   save_restart <- as.integer(save_restart)
@@ -133,7 +132,7 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
 
   # WRC: Adding restart functionality
   # Check if we're doing a warm start
-  use_restart <- FALSE
+  use_restart <- 0L
   restart_uztwc_in <- numeric(n_zones)
   restart_uzfwc_in <- numeric(n_zones)
   restart_lztwc_in <- numeric(n_zones)
@@ -142,20 +141,20 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
   restart_adimc_in <- numeric(n_zones)
   restart_cs_in <- matrix(0, nrow = 19, ncol = n_zones)
   restart_taprev_in <- numeric(n_zones)
-  
+
   if (!is.null(restart_file)) {
     cat("Using warm start from:", restart_file, "\n")
-    use_restart <- TRUE
-    
+    use_restart <- 1L
+
     # Read restart file
     restart_data <- read.csv(restart_file)
-    
+
     # Check that we have the right number of zones
     if (nrow(restart_data) != n_zones) {
-      stop(paste("Restart file has", nrow(restart_data), 
+      stop(paste("Restart file has", nrow(restart_data),
                  "zones but forcing has", n_zones, "zones"))
     }
-    
+
     # Extract SAC states
     restart_uztwc_in <- restart_data$uztwc
     restart_uzfwc_in <- restart_data$uzfwc
@@ -164,16 +163,14 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
     restart_lzfpc_in <- restart_data$lzfpc
     restart_adimc_in <- restart_data$adimc
     restart_taprev_in <- restart_data$taprev
-    
+
     # Extract SNOW17 carryover states (cs_1 through cs_19)
     for (i in 1:19) {
       cs_col <- paste0("cs_", i)
       restart_cs_in[i, ] <- restart_data[[cs_col]]
     }
   }
-  
-  use_restart <- as.integer(use_restart)
-    
+
   output_matrix <- matrix(0, nrow = sim_length, ncol = n_zones)
 
   # Restructure state variables to be put into fortran code
@@ -199,7 +196,7 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
   psfall <- matrix(0, nrow = sim_length, ncol = n_zones)
   prain  <- matrix(0, nrow = sim_length, ncol = n_zones)
 
- 
+
   sac_pars <- rbind(
     pars[pars$name == "uztwm", ]$value,
     pars[pars$name == "uzfwm", ]$value,
@@ -257,7 +254,13 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
   restart_adimc <- numeric(n_zones)
   restart_cs <- matrix(0, nrow = 19, ncol = n_zones)
   restart_taprev <- numeric(n_zones)
-        
+
+  # FIX: Use proper 3D array matching the Fortran declaration exactly
+  # Fortran expects: double precision, dimension(19, sim_length, n_hrus)
+  # R's array() uses column-major order, matching Fortran's storage.
+  cs_ts <- array(0, dim = c(19, sim_length, n_zones))
+  taprev_ts <- matrix(0, nrow = sim_length, ncol = n_zones)
+
   x <- .Fortran("sacsnow",
     n_hrus = as.integer(n_zones),
     dt = as.integer(dt_seconds),
@@ -279,8 +282,8 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
     etd = do.call("cbind", lapply(forcing, "[[", "etd_mm")),
     return_states = return_states,
     save_restart = save_restart,
-    use_restart = use_restart,  # NEW
-    restart_uztwc_in = restart_uztwc_in,  # NEW
+    use_restart = use_restart,
+    restart_uztwc_in = restart_uztwc_in,
     restart_uzfwc_in = restart_uzfwc_in,
     restart_lztwc_in = restart_lztwc_in,
     restart_lzfsc_in = restart_lzfsc_in,
@@ -309,6 +312,8 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
     raim = raim,
     psfall = psfall,
     prain = prain,
+    cs_ts = cs_ts,
+    taprev_ts = taprev_ts,
     restart_uztwc = restart_uztwc,
     restart_uzfwc = restart_uzfwc,
     restart_lztwc = restart_lztwc,
@@ -318,7 +323,7 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
     restart_cs = restart_cs,
     restart_taprev = restart_taprev
   )
-    
+
   if (return_states) {
     return_vars <- c(
       "year", "month", "day", "hour",
@@ -334,9 +339,14 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
     }
 
     states_df <- format_states(x[return_vars])
-    
+
     if (save_restart) {
-      # Return both time series states AND restart states
+      # FIX: cs_ts is already a proper 3D array from .Fortran() -
+      # no need to manually reconstruct from 2D to 3D.
+      # .Fortran() preserves the dim attribute of the input array,
+      # so x$cs_ts comes back as array(dim = c(19, sim_length, n_zones)).
+
+      # Return time series states, restart states, AND cs/taprev time series
       return(list(
         states = states_df,
         restart = list(
@@ -348,7 +358,9 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
           adimc = x$restart_adimc,
           cs = x$restart_cs,
           taprev = x$restart_taprev
-        )
+        ),
+        cs_ts = x$cs_ts,       # Already 3D: 19 x sim_length x n_zones
+        taprev_ts = x$taprev_ts # Already 2D: sim_length x n_zones
       ))
     } else {
       return(states_df)
@@ -358,22 +370,6 @@ sac_snow <- function(dt_hours, forcing, pars, return_states = FALSE,
   }
 }
 
-#' Format state output from sac_snow_states
-#'
-#' @param x output list from sac_snow_states
-#'
-#' @return a data.frame with formatted output
-#'
-format_states <- function(x) {
-  df <- data.frame(year = x$year, month = x$month, day = x$day, hour = x$hour)
-  n_zones <- ncol(x$tci)
-  for (i in 1:n_zones) {
-    for (name in names(x)[-(1:4)]) {
-      df[[paste0(name, "_", i)]] <- x[[name]][, i]
-    }
-  }
-  df
-}
 
 
 #' Execute SAC-SMA, SNOW17, UH, and Lag-K with full state and restart handling
@@ -400,12 +396,12 @@ format_states <- function(x) {
 #'   \item{uh_restart}{(optional) UH restart states}
 #' }
 #' @export
-sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars, 
-                                    restart_file = NULL, 
+sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
+                                    restart_file = NULL,
                                     lagk_restart_file = NULL,
                                     uh_restart_file = NULL,
                                     debug_components = FALSE) {
-  
+
   # ---- SAC-SMA + SNOW17 ----
   sac_out <- sac_snow(
     dt_hours,
@@ -415,7 +411,7 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
     save_restart = TRUE,
     restart_file = restart_file
   )
-  
+
   # Extract states and restart values
   if (is.list(sac_out) && !is.null(sac_out$states)) {
     states_df <- sac_out$states
@@ -424,53 +420,51 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
     states_df <- sac_out
     restart_vals <- NULL
   }
-  
+
   # ---- extract & combine per-zone TCI (Total Channel Input) ----
   tci_cols <- grep("^tci_", names(states_df), value = TRUE)
   if (length(tci_cols) == 0) {
     stop("No tci_* columns found in sac_snow output")
   }
   tci <- as.matrix(states_df[, tci_cols])
-  
+
   # ---- Load UH (Unit Hydrograph) restart states if provided ----
   uh_restart <- NULL
   if (!is.null(uh_restart_file) && file.exists(uh_restart_file)) {
-#     cat("Loading UH restart states from:", uh_restart_file, "\n")
-    uh_restart <- readRDS(uh_restart_file)  # Use RDS for complex R objects
-#     cat("Loaded UH restart states for", length(uh_restart), "zones\n")
+    uh_restart <- readRDS(uh_restart_file)
   }
 
   # ---- UH routing (with restart states) ----
   uh_result <- uh(
-    dt_hours, 
-    tci, 
+    dt_hours,
+    tci,
     pars,
     return_states = TRUE,  # Always get states to save them
     uh_restart = uh_restart
   )
-    
+
   flow_uh <- uh_result$flow
   uh_restart_out <- uh_result$restart
-  
+
   # ---- Load Lag-K restart states if provided ----
   restart_c_array <- NULL
   if (!is.null(lagk_restart_file) && file.exists(lagk_restart_file)) {
     restart_c_array <- readRDS(lagk_restart_file)
   }
-  
-    
+
+
   # ---- Lag-K routing (with restart states) ----
   if (!is.null(uptribs)) {
 
   flow_lagk_result <- lagk(
-    dt_hours, 
-    uptribs, 
+    dt_hours,
+    uptribs,
     pars,
     sum_routes = TRUE,
     return_states = TRUE,
     restart_c_array = restart_c_array
   )
-  
+
   # Extract routed flow
   if (is.data.frame(flow_lagk_result)) {
     lagk_routed_cols <- grep("^routed_", names(flow_lagk_result), value = TRUE)
@@ -479,15 +473,10 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
     } else {
       stop("No routed flow columns found in Lag-K output")
     }
-    
+
     # Save Lag-K restart state (the C array)
     lagk_restart <- attr(flow_lagk_result, "c_array")
-      
-    # When saving (in sac_snow_uh_lagk_states):
-    if (!is.null(lagk_restart)) {
-      saveRDS(lagk_restart, "lagk_restart_split.rds")  # Changed from .csv to .rds
-    }
-    
+
   } else {
     lagk_flow <- flow_lagk_result
     lagk_restart <- NULL
@@ -499,8 +488,8 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
     lagk_restart <- NULL
   }
 
- 
-    
+
+
   # ---- Channel loss ----
   total_flow_cfs <- chanloss(
     flow_uh + lagk_flow,
@@ -508,20 +497,20 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
     dt_hours,
     pars
   )
-  
+
   # ---- Build result ----
   result <- list(
     flow_cfs = total_flow_cfs,
     states = states_df
   )
-  
+
   # Add debug components if requested
   if (debug_components) {
     result$flow_uh <- flow_uh
     result$flow_lagk <- lagk_flow
     result$flow_before_chanloss <- flow_uh + lagk_flow
   }
-  
+
   # Add restart states
   if (!is.null(restart_vals)) {
     result$restart <- restart_vals
@@ -532,10 +521,9 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
   if (!is.null(uh_restart_out)) {
     result$uh_restart <- uh_restart_out
   }
-  
+
   return(result)
 }
-
 
 
 #' Subset forcing data by date range
@@ -816,73 +804,109 @@ uh2p_root <- function(scale, shape, dt_hours, toc) {
 
 #' Two parameter unit hydrograph routing for one or more basin zones
 #'
+#' Performs unit hydrograph routing using the DUAMEL Fortran subroutine.
+#' Supports warm start from previous simulation states.
+#'
 #' @param dt_hours timestep in hours
 #' @param tci channel inflow matrix, one column per zone
-#' @param pars parameters
-#' @param sum_zones should routed flows from multiple zones be added and returned as a vector, or
-#'                  kept separate and returned as a matrix
-#' @param start_of_timestep should the output flow data be shifted by one timestep to account for
-#'                          forcing data that uses beginning of timestep labeling
+#' @param pars parameters data frame
+#' @param sum_zones logical; if TRUE, sum flows from all zones into single vector
+#' @param return_states logical; if TRUE, return restart states for warm start
 #' @param uh_restart optional list of UH restart states from a previous run
-#' @return Vector of routed flow in cfs
-#' If `return_states = FALSE`, routed flow (vector or matrix).
-#' If `return_states = TRUE`, a list with elements `flow` and `restart`.
+#'
+#' @return If return_states=FALSE: routed flow (vector if sum_zones=TRUE, matrix otherwise)
+#'         If return_states=TRUE: list with elements:
+#'           - flow: routed flow
+#'           - restart: list of restart states for each zone
+#'
+#' @details
+#' The UH restart state contains qprev (the last M TCI values used in convolution),
+#' along with shape and scale parameters. These can be saved and used to warm start
+#' a subsequent simulation.
+#'
+#' For snapshot/reforecast applications, use extract_uh_snapshot() to reconstruct
+#' qprev from TCI history at any timestep, rather than saving qprev at every timestep.
+#'
 #' @export
+#'
 #' @examples
 #' data(forcingSAKW1)
 #' data(parsSAKW1)
 #' dt_hours <- 6
 #' tci <- sac_snow(dt_hours, forcingSAKW1, parsSAKW1)
+#'
+#' # Basic usage
 #' flow_cfs <- uh(dt_hours, tci, parsSAKW1)
 #'
-#' data(tciSAKW1)
-#' flow_cfs <- uh(dt_hours, tciSAKW1, parsSAKW1)
+#' # With restart states
+#' result <- uh(dt_hours, tci, parsSAKW1, return_states = TRUE)
+#' flow_cfs <- result$flow
+#' restart <- result$restart  # Save this for warm start
+#'
 #' @useDynLib rfchydromodels duamel_
-# -------------------------------------------------------------------------
-# WRC (Jan 2026) Updates relative to previous uh():
-# - Added support for warm-starting UH routing via qprev restart states
-# - Optionally returns UH restart states for continuation across runs
-# - Core routing behavior and parameter handling remain unchanged
-# - Removed output time shifting for start-of-timestep forcing; UH output
-#   is now aligned with the input timestep index
-# -------------------------------------------------------------------------
 uh <- function(dt_hours, tci, pars, sum_zones = TRUE, return_states = FALSE, uh_restart = NULL) {
-    
+
+  # Constants
   sec_per_day <- 86400
   dt_seconds <- sec_per_day / (24 / dt_hours)
   dt_days <- dt_seconds / sec_per_day
+
+  # Dimensions
   n_zones <- ncol(tci)
   sim_length <- nrow(tci)
-  m <- 1000 # max unit hydro
+  m <- 1000  # max unit hydrograph length
   n <- sim_length + m
-  
-  flow_cfs <- if (sum_zones) numeric(sim_length) else tci
-  
-  # Storage for UH restart states
+
+  # Initialize output
+  if (sum_zones) {
+    flow_cfs <- numeric(sim_length)
+  } else {
+    flow_cfs <- matrix(0, nrow = sim_length, ncol = n_zones)
+  }
+
+  # Storage for restart states
   uh_restart_out <- list()
-  
+
+  # Process each zone
   for (i in 1:n_zones) {
+
+    # Get UH parameters for this zone
     shape <- pars[pars$name == "unit_shape", ]$value[i]
     toc_gis <- pars[pars$name == "unit_toc", ]$value[i]
     toc_adj <- pars[pars$name == "unit_toc_adj", ]$value[i]
-    
+
+    # Calculate scale parameter
     if (is.na(toc_gis) | is.na(toc_adj)) {
       scale <- pars[pars$name == "unit_scale", ]$value[i]
     } else {
       toc <- toc_gis * toc_adj
       scale <- uh2p_get_scale(shape, toc, 1)
     }
-    
-    # Prepare UH restart state (qprev) if provided; otherwise initialize empty
-    if (!is.null(uh_restart) && !is.null(uh_restart[[i]])) {
-      qprev <- as.single(uh_restart[[i]]$qprev)
+
+    # Prepare restart state (qprev) if provided
+    if (!is.null(uh_restart) && length(uh_restart) >= i && !is.null(uh_restart[[i]])) {
+      qprev <- uh_restart[[i]]$qprev
+
+      # Ensure correct length
+      if (length(qprev) < m) {
+        qprev <- c(qprev, rep(0, m - length(qprev)))
+      } else if (length(qprev) > m) {
+        qprev <- qprev[1:m]
+      }
+
+      qprev <- as.single(qprev)
       use_qprev <- 1L
     } else {
       qprev <- as.single(numeric(m))
       use_qprev <- 0L
     }
-     
-      
+
+    # Dummy array for qprev_ts (we don't need time series output)
+    # The Fortran code checks SAVE_TS before writing to this
+    qprev_ts_dummy <- as.single(numeric(1))
+    save_ts <- 0L
+
+    # Call Fortran DUAMEL subroutine
     routed <- .Fortran("duamel",
       tci = as.single(tci[, i]),
       as.single(shape),
@@ -890,33 +914,37 @@ uh <- function(dt_hours, tci, pars, sum_zones = TRUE, return_states = FALSE, uh_
       as.single(dt_days),
       as.integer(n),
       as.integer(m),
-      1L,
-      0L,
+      1L,    # K flag (1 = compute UH)
+      0L,    # NTAU (lag parameter)
       qr = as.single(numeric(n)),
       qprev = qprev,
       use_qprev = use_qprev,
-      qprev_out = as.single(numeric(m))
+      qprev_out = as.single(numeric(m)),
+      qprev_ts = qprev_ts_dummy,
+      save_ts = save_ts
     )
-      
 
-    # Convert to cfs
-    zone_flow <- routed$qr[1:sim_length] * 1000 * 3.28084**3 / dt_seconds *
-      pars[pars$name == "zone_area", ]$value[i]
-    
+    # Convert routed flow to cfs
+    # routed$qr is in mm, convert to cfs using area
+    zone_area <- pars[pars$name == "zone_area", ]$value[i]
+    zone_flow <- routed$qr[1:sim_length] * 1000 * 3.28084^3 / dt_seconds * zone_area
+
+    # Accumulate or store
     if (sum_zones) {
       flow_cfs <- flow_cfs + zone_flow
     } else {
       flow_cfs[, i] <- zone_flow
     }
-      
-    # Store UH restart state for this zone (used for warm starts in future runs)
+
+    # Store restart state for this zone
     uh_restart_out[[i]] <- list(
       qprev = routed$qprev_out,
       shape = shape,
       scale = scale
     )
   }
-  
+
+  # Return based on return_states flag
   if (return_states) {
     return(list(
       flow = flow_cfs,
@@ -939,10 +967,6 @@ uh <- function(dt_hours, tci, pars, sum_zones = TRUE, return_states = FALSE, uh_
 #' @useDynLib rfchydromodels chanloss_
 chanloss <- function(flow, forcing, dt_hours, pars) {
   sim_length <- nrow(forcing[[1]])
-
-  # chanloss(n_clmods, dt, sim_length, year, month, day, hour, &
-  #            factor, period, cl_type, &
-  #            sim, sim_adj)
 
   n_clmods = pars[pars$name == 'n_clmods',]$value[1]
   cl_type = pars[pars$name == 'cl_type',]$value[1]
@@ -1000,12 +1024,6 @@ consuse <- function(input, pars, cfs = TRUE) {
   for (cu_zone in cu_zones) {
     peadj_m <- cu_pars[cu_pars$zone == cu_zone & substr(cu_pars$name, 1, 5) == "peadj", ]$value
 
-    # consuse(sim_length, year, month, day, &
-    #           AREA_in,EFF_in,MFLOW_in, &
-    #           IRFSTOR_in,ACCUM_in,DECAY_in, peadj_m, peadj, &
-    #           PET_in,QNAT_in, &
-    #           QADJ_out,QDIV_out,QRFIN_out,QRFOUT_out, &
-    #           QOL_out,QCD_out,CE_out,RFSTOR_out)
     x <- .Fortran("consuse",
       # inputs
       sim_length = sim_length,
@@ -1054,25 +1072,22 @@ consuse <- function(input, pars, cfs = TRUE) {
 #' @param pars parameters
 #' @param sum_routes add all routed values together or leave separate
 #' @param return_states return the lagk states
+#' @param save_states save C-array at every timestep for snapshot extraction
 #' @param restart_c_array optional Lag-K C-array restart from previous run
 #'
 #' @return vector of routed flows
 #' If `return_states = FALSE`, routed flow (vector or matrix).
 #' If `return_states = TRUE`, a data frame of routed flows and internal states
 #' with attribute `c_array` containing restart data.
+#' If `save_states = TRUE`, returns a list with `result`, `c_array`, and `c_array_ts`.
 #' @export
 #'
 #' @examples NULL
 #' @useDynLib rfchydromodels lagk_
-# -------------------------------------------------------------------------
-# WRC (Jan 2026) Updates relative to previous lagk():
-# - Added support for warm-starting Lag-K routing via C-array restart states
-# - Optionally returns Lag-K restart data for continuation across runs
-# - Fixed use of `uptribs` instead of undefined `upflow`
-# - Core routing behavior and parameter handling remain unchanged
-# -------------------------------------------------------------------------
-lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FALSE,
-                 restart_c_array = NULL)  {
+lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE,
+                 return_states = FALSE, save_states = FALSE,
+                 restart_c_array = NULL) {
+
   sec_per_day <- 86400
   dt_seconds <- sec_per_day / (24 / dt_hours)
   dt_days <- dt_seconds / sec_per_day
@@ -1083,18 +1098,33 @@ lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FAL
   if (!is.null(restart_c_array)) {
     use_c_array_restart <- 1L
     c_array_in <- restart_c_array
+    # When restarting, initial params aren't used but need placeholders
+    ico_in <- numeric(n_uptribs)
+    iinfl_in <- numeric(n_uptribs)
+    ioutfl_in <- numeric(n_uptribs)
+    istor_in <- numeric(n_uptribs)
   } else {
     use_c_array_restart <- 0L
-    c_array_in <- matrix(0, nrow=100, ncol=n_uptribs)  # Dummy array
-    # Still need initial parameters for pin7
+    c_array_in <- matrix(0, nrow = 100, ncol = n_uptribs)
+    # Need initial parameters for pin7
     ico_in <- pars[pars$name == "init_co", ]$value
     iinfl_in <- pars[pars$name == "init_if", ]$value
     ioutfl_in <- pars[pars$name == "init_of", ]$value
     istor_in <- pars[pars$name == "init_stor", ]$value
   }
 
-  lagk_out <- matrix(0, sim_length, n_uptribs)
-  c_array_out <- matrix(0, 100, n_uptribs)
+  # Pre-allocate output arrays
+  lagk_out <- matrix(0, nrow = sim_length, ncol = n_uptribs)
+  co_st_out <- matrix(0, nrow = sim_length, ncol = n_uptribs)
+  inflow_st_out <- matrix(0, nrow = sim_length, ncol = n_uptribs)
+  storage_st_out <- matrix(0, nrow = sim_length, ncol = n_uptribs)
+  c_array_out <- matrix(0, nrow = 100, ncol = n_uptribs)
+
+  # FIX: Use proper 3D array matching the Fortran declaration exactly:
+  #   double precision, dimension(100, sim_length, n_hrus)
+  # MUST always allocate full size because Fortran expects exact dimensions.
+  # The Fortran code will only fill it when save_states = 1.
+  c_array_ts <- array(0, dim = c(100, sim_length, n_uptribs))
 
   routed <- .Fortran("lagk",
     n_hrus = as.integer(n_uptribs),
@@ -1114,25 +1144,58 @@ lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FAL
     lagk_lagmin_in = pars[pars$name == "lagk_lagmin", ]$value,
     lagk_kmin_in = pars[pars$name == "lagk_kmin", ]$value,
     lagk_qmin_in = pars[pars$name == "lagk_qmin", ]$value,
-    ico_in = if(use_c_array_restart == 0) ico_in else numeric(n_uptribs),
-    iinfl_in = if(use_c_array_restart == 0) iinfl_in else numeric(n_uptribs),
-    ioutfl_in = if(use_c_array_restart == 0) ioutfl_in else numeric(n_uptribs),
-    istor_in = if(use_c_array_restart == 0) istor_in else numeric(n_uptribs),
+    ico_in = ico_in,
+    iinfl_in = iinfl_in,
+    ioutfl_in = ioutfl_in,
+    istor_in = istor_in,
     c_array_in = c_array_in,
     use_c_array_restart = use_c_array_restart,
     qa_in = do.call("cbind", lapply(uptribs, function(x) as.numeric(x[["flow_cfs"]]))),
     sim_length = as.integer(sim_length),
     return_states = as.logical(return_states),
+    save_states = as.integer(save_states),
     lagk_out = lagk_out,
-    co_st_out = lagk_out,
-    inflow_st_out = lagk_out,
-    storage_st_out = lagk_out,
-    c_array_out = c_array_out
+    co_st_out = co_st_out,
+    inflow_st_out = inflow_st_out,
+    storage_st_out = storage_st_out,
+    c_array_out = c_array_out,
+    c_array_ts = c_array_ts
   )
 
-  
-  # Return c_array_out for saving
-  if (isTRUE(return_states)) {
+  # If saving states for snapshots, return everything needed
+  if (save_states) {
+    # Build result data frame if return_states is also TRUE
+    if (return_states) {
+      return_vars <- c(
+        "lagk_out" = "routed", "co_st_out" = "lag_time",
+        "inflow_st_out" = "k_inflow", "storage_st_out" = "k_storage"
+      )
+      df <- uptribs[[1]][, c("year", "month", "day", "hour")]
+      for (i in 1:n_uptribs) {
+        for (name in names(return_vars)) {
+          df[[paste0(return_vars[name], "_", i)]] <- routed[[name]][, i]
+        }
+      }
+    } else {
+      df <- NULL
+    }
+
+    return(list(
+      result = df,
+      flow = if (sum_routes & n_uptribs > 1) {
+        apply(routed$lagk_out, 1, sum)
+      } else if (n_uptribs > 1) {
+        routed$lagk_out
+      } else {
+        as.vector(routed$lagk_out)
+      },
+      c_array = routed$c_array_out,
+      c_array_ts = routed$c_array_ts  # 3D array: 100 x sim_length x n_uptribs
+    ))
+  }
+
+  if (return_states) {
+    # Return data frame with time series
     return_vars <- c(
       "lagk_out" = "routed", "co_st_out" = "lag_time",
       "inflow_st_out" = "k_inflow", "storage_st_out" = "k_storage"
@@ -1143,10 +1206,9 @@ lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FAL
         df[[paste0(return_vars[name], "_", i)]] <- routed[[name]][, i]
       }
     }
-    attr(df, "c_array") <- routed$c_array_out  # Attach C array as attribute
+    attr(df, "c_array") <- routed$c_array_out
     return(df)
   }
-                    
 
   if (sum_routes & n_uptribs > 1) {
     return(apply(routed$lagk_out, 1, sum))
@@ -1156,8 +1218,6 @@ lagk <- function(dt_hours, uptribs, pars, sum_routes = TRUE, return_states = FAL
     return(as.vector(routed$lagk_out))
   }
 }
-
-
 
 #' Conputes surface pressure in hPa from a given elevation
 #'
@@ -1177,8 +1237,7 @@ sfc_pressure <- function(elev) {
   # sfc pres in hPa
   a * (b - (c * (elev / 100)) + (d * ((elev / 100)^e)))
 }
-
-
+                    
 #' Daily Potential Evapotranspiration using Hargreaves-Semani equations
 #'
 #' @param lat Latitude in decimal degrees
@@ -1743,3 +1802,59 @@ rsnwelev <- function(forcing, pars, ae_tbl) {
 #'
 #' @examples NULL
 #' @useDynLib rfchydromodels lagk_
+                    
+                    
+#' Format model states from Fortran output into a data frame
+#'
+#' This helper function takes the list output from the Fortran sacsnow call
+#' and reformats it into a tidy data frame with named columns for each zone.
+#'
+#' @param x List containing model output arrays from .Fortran() call
+#'
+#' @return data.frame with columns named var_zone (e.g., tci_1, tci_2, uztwc_1, etc.)
+#' @export
+format_states <- function(x) {
+
+  # Get the number of zones from the first matrix
+  first_mat <- NULL
+  for (name in names(x)) {
+    if (is.matrix(x[[name]]) || (is.array(x[[name]]) && length(dim(x[[name]])) == 2)) {
+      first_mat <- x[[name]]
+      break
+    }
+  }
+
+  if (is.null(first_mat)) {
+    stop("No matrix elements found in input")
+  }
+
+  n_zones <- ncol(first_mat)
+  sim_length <- nrow(first_mat)
+
+  # Initialize result data frame
+  result <- data.frame(row.names = 1:sim_length)
+
+  # Process each variable
+  for (name in names(x)) {
+    val <- x[[name]]
+
+    if (is.matrix(val) || (is.array(val) && length(dim(val)) == 2)) {
+      # Matrix: one column per zone
+      if (nrow(val) == sim_length && ncol(val) == n_zones) {
+        for (z in 1:n_zones) {
+          col_name <- paste0(name, "_", z)
+          result[[col_name]] <- val[, z]
+        }
+      } else if (nrow(val) == sim_length && ncol(val) == 1) {
+        # Single column matrix
+        result[[name]] <- val[, 1]
+      }
+    } else if (is.vector(val) && length(val) == sim_length) {
+      # Vector matching sim_length - add directly
+      result[[name]] <- val
+    }
+    # Skip other types (scalars, mismatched dimensions, etc.)
+  }
+
+  return(result)
+}
