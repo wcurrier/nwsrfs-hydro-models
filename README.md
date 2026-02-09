@@ -1,25 +1,73 @@
 ## This Fork
   
-This fork includes the following updates from the original project:
+## This Fork
+
+This fork extends the original project to support **restartable and snapshot-based hydrologic modeling workflows**, with a focus on reforecasting and ensemble applications.
 
 ### Overarching Goal
-- Enable SAC-SMA/SNOW17 to have **restart (warm-state) capability**, allowing Unit Hydrograph (UH) and Lag-K routing to continue from where they left off.
-- **Modified files**:
-  - `R/sac-snow-uh.R`: added restart functionality (highlighted changes are in `R/README.md`).
-  - Fortran source code: `sac-snow.f90`, `lagk_run.f90`, `duamel.f` (see comments in each file for changes).
-- **Spin-up functionality** is maintained if no restart data are provided.
-- Currently, only saves all states (SAC-SMA/SNOW17, Lag-K, UH) at the last time step.
-  *Future work*: optionally save all time steps for more detailed hindcast evaluation.
+- Build upon the prior update that enabled **saving model states at the final timestep**.
+- Extend this capability to allow:
+  - **Saving model states at user-defined timesteps**
+  - **Restarting (warm starting) the model at arbitrary points after spin-up**
+- Preserve original model behavior when restart/snapshot functionality is not used.
 
-### Testing
-- `tests/test_all.R` was used to validate the code by splitting the model halfway through simulation and checking if the simulated streamflow matched.
-- Individual tests were run on SAC-SMA/SNOW17, UH, and Lag-K components. Very minor differences appeared in SAKW1 run but not the others. Potentially due to something in Lag-K.
-- Examples include full run (no restart/spin-up) and restart run (split at midpoints and restarted). Reproducible with `rfchydromodels/tests/test_all.R`.
+At a high level, this fork enables a workflow where a model can be:
+1. Run once through spin-up,
+2. Snapshotted at one or more timesteps, and
+3. Restarted cleanly from those snapshots for continuation, branching, or reforecasting.
 
-### Notes
-- Only tested in R using the provided example datasets.
-- **WARNING:** Python version (`py-rfchydromodels`) not tested successfully due to Unit Hydrograph issues.
-- **WARNING:** For the test periods, results are functionally equivalent to the original code when `uh()` is run with `start_of_timestep = FALSE` and `backfill = FALSE`. These options control whether output flows are shifted by one timestep to account for forcing data labeled at the beginning of the timestep. The correct convention for this behavior is unclear. In this fork, the timestep-shifting logic has been removed, which may be incorrect.
+---
+
+### Scope of Updates
+Updates span both model source code and R interfaces:
+
+- **Fortran source updates**:
+  - `sac_snow.f90` – SNOW17 and SAC-SMA restart and snapshot support
+  - `duamel.f` – Unit Hydrograph restart capability
+  - `lagk_run.f90` – partial restart and snapshot support
+  - `flag7.f` – supporting changes for restart workflows
+
+- **R interface updates**:
+  - `R/sac-snow-uh.R` – extended to support snapshot saving and warm starts
+  - `R/sac-snow-snapshot-functions.R` – new helper functions for saving,
+    restoring, and managing model state snapshots for reforecasting workflows
+
+These changes are designed to be backward compatible: if restart/snapshot
+features are not enabled, model behavior is equivalent to prior versions.
+
+---
+
+### Restart and Snapshot Notes
+- SAC-SMA and SNOW17 **can be restarted cleanly** from saved states.
+- Unit Hydrograph routing supports warm starts via saved flow history.
+- **Lag-K routing does not yet restart cleanly** in all cases and may introduce
+  small inconsistencies. This component should be treated as **experimental**
+  for restart-based workflows.
+
+---
+
+### Tests and Examples
+Several test and diagnostic scripts are included to demonstrate and validate
+restart behavior:
+
+- `tests/validate_restart_no_lagk.R`  
+  Demonstrates how a model run can be split, restarted, and continued using
+  saved states (excluding Lag-K). This is the **recommended reference example**.
+
+- `tests/diagnose_restart_divergence.R`  
+  Diagnostic tools for identifying restart-related divergence.
+
+- `tests/example_snapshot_usage.R`  
+  Illustrates snapshot saving and restoration for reforecast-style workflows.
+
+---
+
+### Current Limitations
+- Restart functionality has been tested primarily through the R interface.
+- Lag-K restart behavior is incomplete and may introduce errors.
+- Python interfaces have not yet been fully validated with the new snapshot
+  and restart features.
+
 
 ### Example Figures
 
