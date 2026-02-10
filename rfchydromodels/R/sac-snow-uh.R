@@ -400,8 +400,14 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
                                     restart_file = NULL,
                                     lagk_restart_file = NULL,
                                     uh_restart_file = NULL,
-                                    debug_components = FALSE) {
-
+                                    debug_components = FALSE,
+                                    ae_tbl = NULL) {
+    
+  # Auto-apply rsnwelev if pxtemp is in pars and ae_tbl provided
+  if (!is.null(ae_tbl) && any(pars$name == "pxtemp")) {
+    forcing <- rsnwelev(forcing, pars, ae_tbl)
+  }
+    
   # ---- SAC-SMA + SNOW17 ----
   sac_out <- sac_snow(
     dt_hours,

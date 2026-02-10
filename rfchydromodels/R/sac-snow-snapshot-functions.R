@@ -272,8 +272,8 @@ sac_snow_uh_lagk_states_with_snapshots <- function(
     snapshot_file = NULL,
     snapshot_interval = "daily",
     snapshot_hour = 0,
-    snapshot_chunk_size = 2000
-) {
+    snapshot_chunk_size = 2000,
+    ae_tbl = NULL) {
 
   # ---- Input validation ----
   if (save_snapshots && is.null(snapshot_file)) {
@@ -288,6 +288,11 @@ sac_snow_uh_lagk_states_with_snapshots <- function(
     }
   }
 
+  # Auto-apply rsnwelev if pxtemp is in pars and ae_tbl provided
+  if (!is.null(ae_tbl) && any(pars$name == "pxtemp")) {
+    forcing <- rsnwelev(forcing, pars, ae_tbl)
+  }
+    
   # ---- Build datetime vector ----
   forcing_dt <- as.POSIXct(
     ISOdatetime(
