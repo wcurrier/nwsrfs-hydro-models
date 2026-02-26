@@ -1,73 +1,101 @@
-## This Fork
 
-This fork extends the original project to support **restartable and snapshot-based hydrologic modeling workflows**, with a focus on reforecasting and ensemble applications.
+# This Fork
 
-### Overarching Goal
-- Build upon the prior update that enabled **saving model states at the final timestep**.
-- Extend this capability to allow:
-  - **Saving model states at user-defined timesteps**
-  - **Restarting (warm starting) the model at arbitrary points after spin-up**
-- Preserve original model behavior when restart/snapshot functionality is not used.
+This fork extends the original project to support restartable and snapshot-based hydrologic modeling workflows, with a focus on reforecasting and ensemble applications.
+
+## Overarching Goal
+
+* Build upon the prior update that enabled saving model states at the final timestep.
+* Extend this capability to allow:
+   * Saving model states at user-defined timesteps
+   * Restarting (warm starting) the model at arbitrary points after spin-up
+   * Running simulations from minimal forcing inputs (precipitation and temperature only)
+* Preserve original model behavior when restart/snapshot functionality is not used.
 
 At a high level, this fork enables a workflow where a model can be:
 1. Run once through spin-up,
 2. Snapshotted at one or more timesteps, and
 3. Restarted cleanly from those snapshots for continuation, branching, or reforecasting.
 
----
+Additionally, forcing data can be provided in a minimal format (year, month, day, hour, map_mm, mat_degc) and the remaining required fields (ptps, pet_mm, etd_mm) are computed automatically.
 
-### Scope of Updates
+## Scope of Updates
+
 Updates span both model source code and R interfaces:
 
-- **Fortran source updates**:
-  - `sac_snow.f90` – SNOW17 and SAC-SMA restart and snapshot support
-  - `duamel.f` – Unit Hydrograph restart capability
-  - `lagk_run.f90` – partial restart and snapshot support
-  - `flag7.f` – supporting changes for restart workflows
+* Fortran source updates:
+   * `sac_snow.f90` – SNOW17 and SAC-SMA restart and snapshot support
+   * `duamel.f` – Unit Hydrograph restart capability
+   * `lagk_run.f90` – partial restart and snapshot support
+   * `flag7.f` – supporting changes for restart workflows
 
-- **R interface updates**:
-  - `R/sac-snow-uh.R` – extended to support snapshot saving and warm starts
-  - `R/sac-snow-snapshot-functions.R` – new helper functions for saving,
-    restoring, and managing model state snapshots for reforecasting workflows
+* R interface updates:
+   * `R/sac-snow-uh.R` – extended to support snapshot saving, warm starts, and automatic forcing preparation
+   * `R/sac-snow-snapshot-functions.R` – new helper functions for saving, restoring, and managing model state snapshots for reforecasting workflows
+   * `R/prepare_forcing.R` – new functions for computing derived forcing fields from minimal inputs (see below)
 
-These changes are designed to be backward compatible: if restart/snapshot
-features are not enabled, model behavior is equivalent to prior versions.
+These changes are designed to be backward compatible: if restart/snapshot features are not enabled, model behavior is equivalent to prior versions.
 
----
+## Forcing Preparation (`prepare_forcing`)
 
-### Restart and Snapshot Notes
-- SAC-SMA and SNOW17 **can be restarted cleanly** from saved states.
-- Unit Hydrograph routing supports warm starts via saved flow history.
-- **Lag-K routing does not yet restart cleanly** in all cases and may introduce
-  small inconsistencies. This component should be treated as **experimental**
-  for restart-based workflows.
+A new `prepare_forcing()` function allows simulations to be run from minimal forcing files containing only precipitation and temperature. The following fields are computed automatically when missing:
 
----
+* **ptps** (fraction of precipitation as snow): Computed via the `rsnwelev()` Fortran routine using the rain-snow elevation line method. Requires an area-elevation table (`ae_tbl`) and the `pxtemp`/`talr` parameters.
+* **pet_mm** (potential evapotranspiration): Computed via the Hargreaves-Samani equation using sub-daily temperature aggregated to daily tave/tmax/tmin.
+* **etd_mm** (evapotranspiration demand): Computed as `pet_mm * peadj`, where `peadj` is the monthly crop coefficient (`peadj_01`…`peadj_12`) interpolated between months centered on the 16th, matching the Fortran `fa_ts` interpolation scheme.
 
-### Tests and Examples
-Several test and diagnostic scripts are included to demonstrate and validate
-restart behavior:
+### Minimal forcing format
 
-- `tests/validate_restart_no_lagk.R`  
-  Demonstrates how a model run can be split, restarted, and continued using
-  saved states (excluding Lag-K). This is the **recommended reference example**.
+| Column   | Description                |
+|----------|----------------------------|
+| year     | Year                       |
+| month    | Month (1–12)               |
+| day      | Day of month               |
+| hour     | Hour (0, 6, 12, 18 for 6h) |
+| map_mm   | Mean areal precipitation   |
+| mat_degc | Mean areal temperature (°C)|
 
-- `tests/diagnose_restart_divergence.R`  
-  Diagnostic tools for identifying restart-related divergence.
+### Required parameters for forcing preparation
 
-- `tests/example_snapshot_usage.R`  
-  Illustrates snapshot saving and restoration for reforecast-style workflows.
+| Parameter      | Source | Description |
+|----------------|--------|-------------|
+| pxtemp         | pars   | Rain/snow threshold temperature (°C) |
+| talr           | pars   | Lapse rate (°C/100m, **positive** = temp decreases with elevation) |
+| elev           | pars   | Reference elevation for temperature time series (m) |
+| alat           | pars   | Latitude (decimal degrees) |
+| peadj_01–12    | pars   | Monthly ET crop coefficients per zone |
+| ae_tbl         | input  | Area-elevation curve (quantile + elevation per zone) |
 
----
+### Integration
 
-### Current Limitations
-- Restart functionality has been tested primarily through the R interface.
-- Lag-K restart behavior is incomplete and may introduce errors.
-- Python interfaces have not yet been fully validated with the new snapshot
-  and restart features.
-- **WARNING:** For the test periods, results are functionally equivalent to the original code when uh() is run with start_of_timestep = FALSE and backfill = FALSE. These options control whether output flows are shifted by one timestep to account for forcing data labeled at the beginning of the timestep. The correct convention for this behavior is unclear. In this fork, the timestep-shifting logic has been removed, which may be incorrect.
+`prepare_forcing()` is called automatically within `sac_snow_uh_lagk_states_with_snapshots()` and `sac_snow_uh_lagk_states()` when the `ae_tbl` argument is provided. It can also be called independently for offline forcing preparation.
 
-### Example Figures
+### Parameter sign conventions
+
+* **talr** must be **positive** when passed to `rsnwelev`. The EX42 Fortran subroutine computes the rain-snow line elevation as `RSL = TAELEV + (PTA - PXTEMP) * (100 / TALR)`. A negative talr inverts the rain-snow partitioning.
+
+## Restart and Snapshot Notes
+
+* SAC-SMA and SNOW17 can be restarted cleanly from saved states.
+* Unit Hydrograph routing supports warm starts via saved flow history.
+* Lag-K routing does not yet restart cleanly in all cases and may introduce small inconsistencies. This component should be treated as experimental for restart-based workflows.
+
+## Tests and Examples
+
+Several test and diagnostic scripts are included to demonstrate and validate behavior:
+
+* `tests/validate_restart_no_lagk.R` – Demonstrates how a model run can be split, restarted, and continued using saved states (excluding Lag-K). This is the recommended reference example.
+* `tests/diagnose_restart_divergence.R` – Diagnostic tools for identifying restart-related divergence.
+* `tests/example_snapshot_usage.R` – Illustrates snapshot saving and restoration for reforecast-style workflows.
+* `tests/test_prepare_forcing.R` – Validates that minimal forcing (auto-computed ptps/pet/etd) produces identical results to pre-computed forcing through the full simulation and reforecast pipeline.
+
+## Current Limitations
+
+* Restart functionality has been tested primarily through the R interface.
+* Lag-K restart behavior is incomplete and may introduce errors.
+* Python interfaces have not yet been fully validated with the new snapshot and restart features.
+* The Hargreaves-Samani PET computed by `prepare_forcing()` uses raw `mat_degc` rather than forcing-adjusted temperature (`mat_fa`), so PET/ETD values will differ slightly from those produced by the full `fa_ts` Fortran pipeline. This is an expected simplification.
+* WARNING: For the test periods, results are functionally equivalent to the original code when `uh()` is run with `start_of_timestep = FALSE` and `backfill = FALSE`. These options control whether output flows are shifted by one timestep to account for forcing data labeled at the beginning of the timestep. The correct convention for this behavior is unclear. In this fork, the timestep-shifting logic has been removed, which may be incorrect.
 
 #### Basin SAKW1
 ![Restart run for basin SAKW1](https://raw.githubusercontent.com/wcurrier/nwsrfs-hydro-models/main/rfchydromodels/tests/figures/restart_zoom_week_SAKW1.png)  

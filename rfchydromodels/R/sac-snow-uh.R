@@ -403,10 +403,13 @@ sac_snow_uh_lagk_states <- function(dt_hours, forcing, uptribs, pars,
                                     debug_components = FALSE,
                                     ae_tbl = NULL) {
     
-  # Auto-apply rsnwelev if pxtemp is in pars and ae_tbl provided
-  if (!is.null(ae_tbl) && any(pars$name == "pxtemp")) {
-    forcing <- rsnwelev(forcing, pars, ae_tbl)
-  }
+#   # Auto-apply rsnwelev if pxtemp is in pars and ae_tbl provided
+#   if (!is.null(ae_tbl) && any(pars$name == "pxtemp")) {
+#     forcing <- rsnwelev(forcing, pars, ae_tbl)
+#   }
+
+  # Compute missing forcing fields (ptps, pet_mm, etd_mm) if not provided
+  forcing <- prepare_forcing(forcing, pars, dt_hours, ae_tbl)
     
   # ---- SAC-SMA + SNOW17 ----
   sac_out <- sac_snow(
@@ -1863,4 +1866,274 @@ format_states <- function(x) {
   }
 
   return(result)
+}
+                    
+#' Prepare forcing data by computing missing fields from minimal inputs
+#'
+#' Given forcing with at minimum (year, month, day, hour, map_mm, mat_degc),
+#' computes any missing columns:
+#'   - ptps: via rsnwelev() if ae_tbl and pxtemp parameter are available
+#'   - pet_mm: via Hargreaves-Samani from sub-daily temperature
+#'   - etd_mm: pet_mm * monthly peadj multiplier per zone
+#'
+#' If forcing already contains these columns, they are left unchanged.
+#'
+#' @param forcing list of forcing data frames (one per zone)
+#' @param pars parameter data frame
+#' @param dt_hours timestep in hours
+#' @param ae_tbl area-elevation table for rsnwelev ptps computation
+#'
+#' @return forcing list with ptps, pet_mm, and etd_mm columns populated
+#' @export
+prepare_forcing <- function(forcing, pars, dt_hours, ae_tbl) {
+
+  n_zones <- length(forcing)
+  required_cols <- c("year", "month", "day", "hour", "map_mm", "mat_degc")
+
+  # --- Validate minimal columns exist ---
+  for (i in seq_len(n_zones)) {
+    missing <- setdiff(required_cols, names(forcing[[i]]))
+    if (length(missing) > 0) {
+      stop(sprintf("Zone %d forcing is missing required columns: %s",
+                   i, paste(missing, collapse = ", ")))
+    }
+  }
+
+  # --- Compute ptps via rsnwelev (always recomputed when ae_tbl provided) ---
+  if (is.null(ae_tbl)) {
+    stop("ae_tbl must be provided for prepare_forcing()")
+  }
+  if (!any(pars$name == "pxtemp")) {
+    stop("pxtemp parameter not found in pars")
+  }
+  cat("  Computing ptps via rsnwelev...\n")
+  forcing <- rsnwelev(forcing, pars, ae_tbl)
+
+  # --- Compute pet_mm and etd_mm if etd_mm is missing ---
+  needs_etd <- any(vapply(forcing, function(x) is.null(x[["etd_mm"]]), logical(1)))
+
+  if (needs_etd) {
+    cat("  Computing pet_mm and etd_mm via Hargreaves-Samani...\n")
+    forcing <- compute_pet_etd(forcing, pars, dt_hours)
+  }
+
+  return(forcing)
+}
+
+
+#' Compute pet_mm and etd_mm from sub-daily temperature forcing
+#'
+#' Aggregates sub-daily mat_degc to daily tave/tmax/tmin, computes daily PET
+#' via Hargreaves-Samani, divides into sub-daily timesteps, and applies
+#' monthly peadj multipliers to produce etd_mm.
+#'
+#' @param forcing list of forcing data frames (one per zone)
+#' @param pars parameter data frame (must contain alat, peadj_01..peadj_12)
+#' @param dt_hours timestep in hours
+#'
+#' @return forcing list with pet_mm and etd_mm columns added
+#' @keywords internal
+compute_pet_etd <- function(forcing, pars, dt_hours) {
+
+  n_zones <- length(forcing)
+  steps_per_day <- as.integer(24 / dt_hours)
+
+  # Get zone names to look up per-zone parameters
+  zone_names <- names(forcing)
+  if (is.null(zone_names)) {
+    zone_names <- unique(pars$zone)
+  }
+
+  # Get latitude per zone from pars
+  lat_rows <- pars[pars$name == "alat", ]
+
+  for (i in seq_len(n_zones)) {
+    f <- forcing[[i]]
+    sim_length <- nrow(f)
+
+    # Get latitude for this zone
+    lat <- lat_rows$value[i]
+
+    # --- Aggregate to daily stats ---
+    # Build a day index: each group of steps_per_day rows is one day
+    # This avoids needing dplyr/data.table for grouping
+    n_days <- sim_length %/% steps_per_day
+    if (n_days * steps_per_day != sim_length) {
+      warning(sprintf(
+        "Zone %d: sim_length (%d) is not evenly divisible by steps_per_day (%d). Trailing timesteps ignored for PET.",
+        i, sim_length, steps_per_day
+      ))
+    }
+
+    day_idx <- rep(seq_len(n_days), each = steps_per_day)[1:sim_length]
+    mat <- f$mat_degc[1:(n_days * steps_per_day)]
+
+    # Daily temperature stats
+    tave <- tapply(mat, day_idx[1:length(mat)], mean)
+    tmax <- tapply(mat, day_idx[1:length(mat)], max)
+    tmin <- tapply(mat, day_idx[1:length(mat)], min)
+
+    # Julian day for each day (use first timestep of each day)
+    day_starts <- seq(1, by = steps_per_day, length.out = n_days)
+    jday <- as.integer(format(
+      as.Date(
+        ISOdate(f$year[day_starts], f$month[day_starts], f$day[day_starts])
+      ),
+      "%j"
+    ))
+
+    # Month for each day (for peadj lookup)
+    day_month <- f$month[day_starts]
+
+    # --- Compute daily PET via Hargreaves-Samani ---
+    daily_pet <- pet_hs_daily(lat, jday, as.numeric(tave),
+                              as.numeric(tmax), as.numeric(tmin))
+
+    # Sub-daily PET: divide daily total evenly across timesteps
+    subdaily_pet <- daily_pet / steps_per_day
+
+    # --- Apply monthly peadj multipliers ---
+    # Extract peadj_01..peadj_12 for this zone
+    zone_name <- zone_names[i]
+    peadj_monthly <- numeric(12)
+    for (m in 1:12) {
+      pname <- sprintf("peadj_%02d", m)
+      row <- pars[pars$name == pname & pars$zone == zone_name, ]
+      if (nrow(row) == 0) {
+        # Fallback: try without zone filter (single-zone case)
+        row <- pars[pars$name == pname, ]
+      }
+      if (nrow(row) > 0) {
+        peadj_monthly[m] <- row$value[1]
+      } else {
+        peadj_monthly[m] <- 1.0  # Default: no adjustment
+        warning(sprintf("peadj_%02d not found for zone %s, using 1.0", m, zone_name))
+      }
+    }
+
+    # Daily etd = daily_pet * peadj for that month (interpolated, centered on 16th)
+    # Match Fortran: peadj is assigned to the 16th of each month, and values
+    # between months are linearly interpolated.
+    daily_peadj <- interpolate_peadj(
+      peadj_monthly,
+      f$year[day_starts],
+      f$month[day_starts],
+      f$day[day_starts],
+      dt_hours
+    )
+    daily_etd <- daily_pet * daily_peadj
+    subdaily_etd <- daily_etd / steps_per_day
+
+    # --- Expand daily values back to sub-daily timesteps ---
+    pet_mm <- rep(subdaily_pet, each = steps_per_day)
+    etd_mm <- rep(subdaily_etd, each = steps_per_day)
+
+    # Handle trailing timesteps if sim_length not evenly divisible
+    if (length(pet_mm) < sim_length) {
+      pet_mm <- c(pet_mm, rep(pet_mm[length(pet_mm)], sim_length - length(pet_mm)))
+      etd_mm <- c(etd_mm, rep(etd_mm[length(etd_mm)], sim_length - length(etd_mm)))
+    }
+
+    forcing[[i]]$pet_mm <- pet_mm[1:sim_length]
+    forcing[[i]]$etd_mm <- etd_mm[1:sim_length]
+  }
+
+  return(forcing)
+}
+
+
+#' Daily Potential Evapotranspiration using Hargreaves-Samani equations
+#'
+#' Returns DAILY PET in mm/day. Caller is responsible for temporal disaggregation.
+#'
+#' @param lat Latitude in decimal degrees
+#' @param jday Julian day (Day of year since Jan 1)
+#' @param tave Average daily temperature (C)
+#' @param tmax Max daily temperature (C)
+#' @param tmin Min daily temperature (C)
+#'
+#' @return Daily PET in mm/day (vectorized over all inputs)
+#' @export
+pet_hs_daily <- function(lat, jday, tave, tmax, tmin) {
+  # Inverse Relative Distance Earth to Sun
+  d_r <- 1 + 0.033 * cos((2 * pi) / 365 * jday)
+  # Solar Declination
+  rho <- 0.409 * sin((2 * pi) / 365 * jday - 1.39)
+  # Sunset Hour Angle
+  omega_s <- acos(-tan(lat * pi / 180) * tan(rho))
+  # Extraterrestrial Radiation (MJ m^-2 day^-1)
+  r_e <- (24 * 60) / pi * 0.0820 * d_r *
+    (omega_s * sin(lat * pi / 180) * sin(rho) +
+       cos(lat * pi / 180) * cos(rho) * sin(omega_s))
+  # Hargreaves-Samani daily PET (mm/day)
+  # Divide by 2.45 to convert MJ to mm equivalent
+  pet <- 0.0023 * (tave + 17.8) * (tmax - tmin)^0.5 * r_e / 2.45
+  # Match Fortran: ignore negative values
+  pet[pet < 0] <- 0
+  pet
+}
+
+
+#' Interpolate monthly peadj values centered on the 16th of each month
+#'
+#' Matches the Fortran fa_ts interpolation: peadj values are anchored to
+#' the 16th of each month and linearly interpolated between months.
+#'
+#' @param peadj_monthly numeric(12) monthly peadj values
+#' @param year integer vector of year for each day
+#' @param month integer vector of month for each day
+#' @param day_of_month integer vector of day-of-month for each day
+#' @param dt_hours model timestep in hours
+#'
+#' @return numeric vector of interpolated peadj, one per day
+#' @keywords internal
+interpolate_peadj <- function(peadj_monthly, year, month, day_of_month, dt_hours) {
+
+  n_days <- length(year)
+  peadj_out <- numeric(n_days)
+
+  # Build prev/next month lookup (circular: Dec <-> Jan)
+  peadj_prev <- c(peadj_monthly[12], peadj_monthly[1:11])
+  peadj_next <- c(peadj_monthly[2:12], peadj_monthly[1])
+
+  # Days in each month (non-leap baseline)
+  mdays_base <- c(31L, 28L, 31L, 30L, 31L, 30L, 31L, 31L, 30L, 31L, 30L, 31L)
+  mdays_prev_base <- c(31L, 31L, 28L, 31L, 30L, 31L, 30L, 31L, 31L, 30L, 31L, 30L)
+
+  # Fortran: interp_day = 16 + dt_hours/24
+  interp_day <- 16 + dt_hours / 24
+
+  for (d in seq_len(n_days)) {
+    yr <- year[d]
+    mo <- month[d]
+    dom <- day_of_month[d]
+
+    # Leap year adjustment
+    is_leap <- (yr %% 4 == 0 & yr %% 100 != 0) | (yr %% 400 == 0)
+    mdays <- mdays_base
+    mdays_prev <- mdays_prev_base
+    if (is_leap) {
+      mdays[2] <- 29L
+      mdays_prev[3] <- 29L
+    }
+
+    # Fortran: decimal_day = day + dt_hours/24
+    decimal_day <- dom + dt_hours / 24
+
+    if (decimal_day >= interp_day) {
+      # After the 16th: interpolate current -> next month
+      dayn <- mdays[mo]
+      dayi <- decimal_day - interp_day
+      peadj_out[d] <- peadj_monthly[mo] +
+        dayi / dayn * (peadj_next[mo] - peadj_monthly[mo])
+    } else {
+      # Before the 16th: interpolate previous -> current month
+      dayn <- mdays_prev[mo]
+      dayi <- decimal_day - interp_day + mdays_prev[mo]
+      peadj_out[d] <- peadj_prev[mo] +
+        dayi / dayn * (peadj_monthly[mo] - peadj_prev[mo])
+    }
+  }
+
+  peadj_out
 }

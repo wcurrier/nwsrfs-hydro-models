@@ -288,10 +288,13 @@ sac_snow_uh_lagk_states_with_snapshots <- function(
     }
   }
 
-  # Auto-apply rsnwelev if pxtemp is in pars and ae_tbl provided
-  if (!is.null(ae_tbl) && any(pars$name == "pxtemp")) {
-    forcing <- rsnwelev(forcing, pars, ae_tbl)
-  }
+#   # Auto-apply rsnwelev if pxtemp is in pars and ae_tbl provided
+#   if (!is.null(ae_tbl) && any(pars$name == "pxtemp")) {
+#     forcing <- rsnwelev(forcing, pars, ae_tbl)
+#   }
+    
+  # Compute missing forcing fields (ptps, pet_mm, etd_mm) if not provided
+  forcing <- prepare_forcing(forcing, pars, dt_hours, ae_tbl)
     
   # ---- Build datetime vector ----
   forcing_dt <- as.POSIXct(
@@ -746,7 +749,8 @@ run_reforecast_from_snapshot <- function(
     pars,
     basin_name,
     dt_hours = 6,
-    temp_dir = tempdir()
+    temp_dir = tempdir(),
+    ae_tbl = NULL
 ) {
 
   cat("=== Running Reforecast ===\n")
@@ -764,7 +768,8 @@ run_reforecast_from_snapshot <- function(
     pars = pars,
     restart_file = restart_files$sac_snow,
     uh_restart_file = restart_files$uh,
-    lagk_restart_file = restart_files$lagk
+    lagk_restart_file = restart_files$lagk,
+    ae_tbl = ae_tbl
   )
 
   cat("  Forecast complete!\n")
