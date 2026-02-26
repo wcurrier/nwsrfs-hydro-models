@@ -18,16 +18,6 @@ suppressPackageStartupMessages({
   load_all(".")  # Load your package
 })
 
-suppressPackageStartupMessages({
-  library(devtools)
-  library(dplyr)
-  library(ggplot2)
-  load_all(".")  # Load your package
-})
-
-# Source the snapshot functions
-# source("sac_snapshot_functions.R")
-
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -43,6 +33,25 @@ data(upflowSAKW1)
 forcing <- forcingSAKW1
 pars <- parsSAKW1
 uptribs <- upflowSAKW1
+
+# Add pxtemp and talr parameters (needed for rsnwelev ptps computation)
+# These would normally be in the parameter file; added here for testing.
+extra_pars <- data.frame(
+  p_name = c("pxtemp_SAKW1-1", "pxtemp_SAKW1-2", "talr_SAKW1-1", "talr_SAKW1-2"),
+  name   = c("pxtemp",         "pxtemp",          "talr",         "talr"),
+  type   = c("snow",           "snow",             "snow",         "snow"),
+  zone   = c("SAKW1-1",        "SAKW1-2",          "SAKW1-1",      "SAKW1-2"),
+  value  = c(-0.867040346419604, 2.9642471707163, 0.711034803854563, 0.745278555068483),
+  stringsAsFactors = FALSE
+)
+pars <- rbind(as.data.frame(pars), extra_pars)
+
+
+# Load area-elevation curve (required for ptps computation via rsnwelev)
+ae_tbl <- read.csv(
+  "/home/wcurrier/src/nwsrfs-hydro-autocalibration/runs/2zone/SAKW1/area_elev_curve.csv",
+  check.names = FALSE
+)
 
 # Create output directories
 dir.create("snapshots", showWarnings = FALSE)
@@ -67,6 +76,7 @@ result_with_snapshots <- sac_snow_uh_lagk_states_with_snapshots(
   forcing = forcing,
   uptribs = uptribs,
   pars = pars,
+  ae_tbl = ae_tbl,
   save_snapshots = TRUE,
   snapshot_file = snapshot_file,
   snapshot_interval = "daily",  # Save once per day
@@ -166,7 +176,8 @@ reforecast_result <- run_reforecast_from_snapshot(
   uptribs = uptribs_reforecast,
   pars = pars,
   basin_name = basin,
-  temp_dir = "reforecast_states"
+  temp_dir = "reforecast_states",
+  ae_tbl = ae_tbl
 )
 
 cat("Reforecast simulation complete!\n")
@@ -215,9 +226,9 @@ plot_df <- data.frame(
 plot_window <- plot_df[1:min(nrow(plot_df), 30 * 24 / dt_hours), ]
 
 p1 <- ggplot(plot_window) +
-  geom_line(aes(datetime, original, color = "Original run"), size = 0.8) +
-  geom_line(aes(datetime, reforecast, color = "Reforecast"), 
-            size = 0.8, linetype = "dashed") +
+  geom_line(aes(datetime, original, color = "Original run"), linewidth = 0.8) +
+  geom_line(aes(datetime, reforecast, color = "Reforecast"),
+            linewidth = 0.8, linetype = "dashed") +
   scale_color_manual(values = c("Original run" = "blue", "Reforecast" = "red")) +
   labs(
     title = paste("Reforecast comparison:", basin),
@@ -230,7 +241,7 @@ p1 <- ggplot(plot_window) +
   theme(legend.position = "bottom")
 
 p2 <- ggplot(plot_window) +
-  geom_line(aes(datetime, difference), size = 0.8) +
+  geom_line(aes(datetime, difference), linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
   labs(
     title = "Difference (Reforecast - Original)",
@@ -266,6 +277,7 @@ result_4step <- sac_snow_uh_lagk_states_with_snapshots(
   forcing = forcing,
   uptribs = uptribs,
   pars = pars,
+  ae_tbl = ae_tbl,
   save_snapshots = TRUE,
   snapshot_file = "snapshots/snapshots_every_24hr_SAKW1.rds",
   snapshot_interval = 4  # Every 4 timesteps
@@ -283,6 +295,7 @@ cat("
 #   forcing = forcing,
 #   uptribs = uptribs,
 #   pars = pars,
+#   ae_tbl = ae_tbl,
 #   save_snapshots = TRUE,
 #   snapshot_file = 'snapshots/snapshots_all_SAKW1.rds',
 #   snapshot_interval = 'all'
@@ -327,7 +340,8 @@ print(reforecast_dates)
 #     uptribs = forecast_uptribs,
 #     pars = pars,
 #     basin_name = basin,
-#     temp_dir = tempdir()
+#     temp_dir = tempdir(),
+#     ae_tbl = ae_tbl
 #   )
 #   
 #   # Save forecast output
